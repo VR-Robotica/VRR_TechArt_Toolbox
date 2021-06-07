@@ -1,0 +1,19 @@
+{
+    "name": "VRR.TechArtToolBox.Runtime",
+    "rootNamespace": "",
+    "references": [
+        "GUID:a9b60dbe80a9eb6438ce44df234cf39a",
+        "GUID:87d98fe5844df7a4baa88804c8588591",
+        "GUID:877421ccee4ee244aa929fe36be7211a",
+        "GUID:7afbeed0b4a66b842b7bbde3e0486ba8"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

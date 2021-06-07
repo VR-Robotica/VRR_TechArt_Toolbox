@@ -1,0 +1,21 @@
+{
+  "name": "com.vrr.techart-toolbox",
+  "version": "1.0.0",
+  "displayName": "VRR",
+  "description": "An ever evolving collection of common tools for Unity Tech Artists",
+  "unity": "2020.1",
+  "dependencies": {
+    "com.unity.xr.management": "4.0.5",
+    "com.unity.xr.oculus": "1.8.1"
+  },
+  "keywords": [
+    "VRR",
+    "TechArt",
+    "ToolBox"
+  ],
+  "author": {
+    "name": "Robotica",
+    "email": "solicitation@vrrobotica.com",
+    "url": "https://vrrobotica.com"
+  }
+}

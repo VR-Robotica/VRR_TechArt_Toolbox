@@ -1,0 +1,21 @@
+{
+    "name": "VRR.Avatar.Hands.OVR",
+    "references": [
+        "Oculus.VR",
+        "VRR.Input",
+        "VRR.Input.OVR"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [
+        "Stadia"
+    ],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "OVR_PLUGIN"
+    ],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
