@@ -40,7 +40,7 @@ If you have those plugins installed you can use the Avatar Setup tool to automat
 Use Unity's Package Manager to install this from the URL or local clone repository. If you have one of the plugins mentioned in Integrations, you can import the integration packages from the Editor/Integrations Packages folder. More to come...
 
 ## Acknowledgements
-General Menu - Symbol Defines:
+* General Menu - Symbol Defines:
 - Inspired from Lane Fox's [Symbol Define Utility](https://gist.github.com/LaneF/91b4142c0387c10c195cdc45a0f10e57)
-Animation Menu - Parameter Renamer:
+* Animation Menu - Parameter Renamer:
 - Adapted from Sebastian Krośkiewicz's [Unity Animation Hierarchy Editor](https://github.com/s-m-k/Unity-Animation-Hierarchy-Editor)
