@@ -41,6 +41,6 @@ Use Unity's Package Manager to install this from the URL or local clone reposito
 
 ## Acknowledgements
 * General Menu - Symbol Defines:
-- Inspired from Lane Fox's [Symbol Define Utility](https://gist.github.com/LaneF/91b4142c0387c10c195cdc45a0f10e57)
+** Inspired from Lane Fox's [Symbol Define Utility](https://gist.github.com/LaneF/91b4142c0387c10c195cdc45a0f10e57)
 * Animation Menu - Parameter Renamer:
-- Adapted from Sebastian Krośkiewicz's [Unity Animation Hierarchy Editor](https://github.com/s-m-k/Unity-Animation-Hierarchy-Editor)
+** Adapted from Sebastian Krośkiewicz's [Unity Animation Hierarchy Editor](https://github.com/s-m-k/Unity-Animation-Hierarchy-Editor)
