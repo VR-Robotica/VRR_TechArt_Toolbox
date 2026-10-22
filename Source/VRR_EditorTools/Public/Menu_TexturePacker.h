@@ -3,76 +3,73 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core_TexturePacker.h"
+#include "ImageCore.h"
 #include "Input/Reply.h"
-#include "Engine/Texture.h"
+#include "Styling/SlateBrush.h"
+#include "UObject/StrongObjectPtr.h"
+#include "Widgets/SCompoundWidget.h"
 
 class UTexture2D;
 
-struct FTextureData
-{
-	TArray<uint8> Data;
-	
-	FString TextureName;
-	ETextureSourceFormat Format = TSF_Invalid; // TextureDefines.h
-	int32 Width = 0;
-	int32 Height = 0;
-	
-	bool bIsValid = false;
-	
-	FText ErrorMessage;
-};
-
-struct FChannelSelection
-{
-	bool bRedChannel	= false;
-	bool bGreenChannel	= false;
-	bool bBlueChannel	= false;
-	bool bAlphaChannel	= false;
-};
-
-struct FTextureInput
-{
-	FString TextureType;
-	TWeakObjectPtr<UTexture2D> TextureInput;
-	FChannelSelection ChannelSelection;
-};
-
-class Menu_TexturePacker : SWidget
+/**
+ * Toolbox "Packer" page: pick up to four textures and choose which of their channels go into the
+ * R, G, B and A of a new texture. The packing itself is in TexturePacker (Core_TexturePacker.h).
+ */
+class SMenu_TexturePacker : public SCompoundWidget
 {
 public:
-	Menu_TexturePacker();
-	~Menu_TexturePacker();
-	
-	//TSharedRef<SWidget> Menu;
-	
-	void Initialize();
-	TSharedRef<SWidget> LayoutMenu();
-protected:
+	SLATE_BEGIN_ARGS(SMenu_TexturePacker) {}
+	SLATE_END_ARGS()
+
+	static constexpr int32 NumSources = FTexturePackSettings::NumSources;
+	static constexpr int32 NumChannels = FTexturePackSettings::NumChannels;
+
+	/** Largest side of the preview image, in pixels. */
+	static constexpr int32 PreviewMaxSize = 256;
+
+	void Construct(const FArguments& InArgs);
+
+private:
+	// Inputs
+	FTexturePackSettings Settings;
+
+	// Combo box options
+	TArray<TSharedPtr<int32>> SourceOptions;	// INDEX_NONE, 0..NumSources-1
+	TArray<TSharedPtr<int32>> ChannelOptions;	// 0..3
+	TArray<TSharedPtr<FString>> CompressionOptions;	// same order as ETexturePackCompression
+
+	// Output settings
+	FString OutputFileName = TEXT("T_Packed");
+	FString OutputFolder = TEXT("/Game/Textures");	// project Content/Textures
 	bool bFileNameManuallyEdited = false;
-	
-	// Texture Library to pick and choose channels from
-	TWeakObjectPtr<UTexture2D> InputTexture_Diffuse;
-	TWeakObjectPtr<UTexture2D> InputTexture_Metallic;
-	TWeakObjectPtr<UTexture2D> InputTexture_Specular;
-	TWeakObjectPtr<UTexture2D> InputTexture_Roughness;
-	TWeakObjectPtr<UTexture2D> InputTexture_Opacity;
-	TWeakObjectPtr<UTexture2D> InputTexture_Normal;
-	TWeakObjectPtr<UTexture2D> InputTexture_AO;
-	TWeakObjectPtr<UTexture2D> InputTexture_Displacement;
-	TWeakObjectPtr<UTexture2D> InputTexture_Edges;
-	TWeakObjectPtr<UTexture2D> InputTexture_Cavity;
-	
-	TArray<TSharedPtr<FString>> CompressionOptions;
-	
-	// Menu Creation
-	
-	TSharedRef<SWidget> CreateTextureInputWidget(const FString& WidgetLabel, TWeakObjectPtr<UTexture2D>& TextureInputPtr, const FString& Tooltip = "");
-	
-	private:
-	// cache
-	FString OutputFileName = "T_Packed_Texture";
-	TSharedPtr<FString> CurrentCompressionOption;
-	
-	// helpers
-	void AutoGenerateFileName();
+
+	// Preview
+	enum class EPreviewMode : int32 { RGB, R, G, B, A };
+	EPreviewMode PreviewMode = EPreviewMode::RGB;
+	FImage PreviewSourceCache[NumSources];		// each source shrunk to preview size
+	TStrongObjectPtr<UTexture2D> PreviewTexture;
+	FSlateBrush PreviewBrush;
+	FIntPoint OutputSize = FIntPoint::ZeroValue;
+
+	// Layout
+	TSharedRef<SWidget> CreateSourceRow(int32 SourceIndex);
+	TSharedRef<SWidget> CreateChannelRow(int32 ChannelIndex);
+	TSharedRef<SWidget> CreateOutputSettings();
+	TSharedRef<SWidget> CreatePreview();
+
+	// Labels
+	FText GetSourceOptionText(int32 SourceIndex) const;
+	FText GetCompressionText() const;
+	static FText GetChannelName(int32 ChannelIndex);
+
+	// Behavior
+	/** Why Pack can't run yet, or empty when it can. */
+	FText GetPackBlocker() const;
+	FReply OnPackClicked();
+	void OnSourcesChanged();
+
+	// Preview
+	void RefreshPreviewSources();
+	void UpdatePreview();
 };

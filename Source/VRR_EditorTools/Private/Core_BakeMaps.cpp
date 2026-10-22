@@ -1,0 +1,761 @@
+// Fill out your copyright notice in the Description page of Project Settings.
+
+/*
+ * Mesh map baking: Cavity, Edge and Curvature masks computed from the mesh itself (no high-poly source).
+ * Materials use them for toon details: dark crevices, bright worn edges, rim tints on convex areas.
+ *
+ * Process
+ *  1. Weld the mesh by position (BuildWeldedMesh) so hard edges and UV seams don't cut the surface into pieces.
+ *     That gives one smooth normal per position, a neighbor list, and the triangles that share each edge.
+ *  2. Compute each map per welded vertex (cheap, and smooth across UV seams):
+ *       Curvature - how fast the normal turns along the surface (0.5 = flat, brighter = convex).
+ *       Cavity    - how far a vertex sits below a smoothed copy of the surface (dark = recessed).
+ *     Edge is different: it comes from creases (sharp angles between faces) and is measured per texel
+ *     as the distance to the nearest crease, so the line width doesn't depend on the vertex density.
+ *  3. Rasterize every triangle in UV space, blending the vertex values with barycentric weights.
+ *  4. Pad the UV islands outward so filtering and mips at island borders don't pull in background.
+ *  5. Write one packed _CCE mask (R Curvature, G Cavity, B Edge) or one grayscale texture per map.
+ */
+
+#include "Core_BakeMaps.h"
+
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "Core_Common.h"
+#include "Engine/Texture2D.h"
+#include "MeshDescription.h"
+#include "Misc/PackageName.h"
+#include "Misc/ScopedSlowTask.h"
+#include "StaticMeshAttributes.h"
+#include "UObject/Package.h"
+
+#define LOCTEXT_NAMESPACE "MeshMapBaker"
+
+namespace BakeMapsImpl
+{
+	/** The mesh with vertices welded by position, so hard edges and UV seams don't break up neighborhoods. */
+	struct FWeldedMesh
+	{
+		TArray<FVector3f> Positions;				// per welded vertex
+		TArray<FVector3f> Normals;					// per welded vertex, smooth (angle-weighted face normals)
+		TArray<TArray<int32>> Neighbors;			// per welded vertex
+		TArray<FIntVector> Triangles;				// welded vertex indices, non-degenerate triangles only
+		TArray<FVertexInstanceID> Corners;			// 3 per triangle, for UV lookups
+		TArray<FVector3f> FaceNormals;				// per triangle
+		TMap<uint64, TArray<int32, TInlineAllocator<2>>> EdgeTriangles;	// edge key -> triangles using it
+	};
+
+	/** Order-independent key for the edge between two welded vertices (smaller index in the high bits). */
+	uint64 EdgeKey(int32 A, int32 B)
+	{
+		if (A > B)
+		{
+			Swap(A, B);
+		}
+		return (static_cast<uint64>(static_cast<uint32>(A)) << 32) | static_cast<uint32>(B);
+	}
+
+	/** EdgeKey back to its two vertex indices. */
+	void SplitEdgeKey(uint64 Key, int32& OutA, int32& OutB)
+	{
+		OutA = static_cast<int32>(Key >> 32);
+		OutB = static_cast<int32>(Key & 0xffffffffu);
+	}
+
+	/**
+	 * Builds FWeldedMesh from the mesh description:
+	 *  1. weld vertices closer than WeldDistance (spatial grid lookup),
+	 *  2. detect face winding from the mesh's own normals,
+	 *  3. collect triangles, face normals, angle-weighted smooth normals, neighbors and edge -> triangle links.
+	 */
+	void BuildWeldedMesh(const FMeshDescription& MeshDescription, float WeldDistance, FWeldedMesh& Out)
+	{
+		FStaticMeshConstAttributes Attributes(MeshDescription);
+		TVertexAttributesConstRef<FVector3f> Positions = Attributes.GetVertexPositions();
+		TVertexInstanceAttributesConstRef<FVector3f> InstanceNormals = Attributes.GetVertexInstanceNormals();
+
+		// 1. Weld by position with a hash grid
+		TArray<int32> ClusterOfVertex;
+		ClusterOfVertex.Init(INDEX_NONE, MeshDescription.Vertices().GetArraySize());
+		TMap<FIntVector, TArray<int32>> Grid;
+		const float CellSize = FMath::Max(WeldDistance, 0.001f);
+		const float WeldDistanceSq = FMath::Square(WeldDistance);
+
+		for (const FVertexID VertexID : MeshDescription.Vertices().GetElementIDs())
+		{
+			const FVector3f Position = Positions[VertexID];
+			const FIntVector Cell(FMath::FloorToInt32(Position.X / CellSize), FMath::FloorToInt32(Position.Y / CellSize), FMath::FloorToInt32(Position.Z / CellSize));
+
+			int32 Cluster = INDEX_NONE;
+			for (int32 X = -1; X <= 1 && Cluster == INDEX_NONE; ++X)
+			for (int32 Y = -1; Y <= 1 && Cluster == INDEX_NONE; ++Y)
+			for (int32 Z = -1; Z <= 1 && Cluster == INDEX_NONE; ++Z)
+			{
+				if (const TArray<int32>* Clusters = Grid.Find(Cell + FIntVector(X, Y, Z)))
+				{
+					for (const int32 Candidate : *Clusters)
+					{
+						if (FVector3f::DistSquared(Out.Positions[Candidate], Position) <= WeldDistanceSq)
+						{
+							Cluster = Candidate;
+							break;
+						}
+					}
+				}
+			}
+			if (Cluster == INDEX_NONE)
+			{
+				Cluster = Out.Positions.Add(Position);
+				Grid.FindOrAdd(Cell).Add(Cluster);
+			}
+			ClusterOfVertex[VertexID.GetValue()] = Cluster;
+		}
+
+		// 2. Face winding: match the mesh's own normals, whatever the handedness
+		double Orientation = 0.0;
+		for (const FTriangleID TriangleID : MeshDescription.Triangles().GetElementIDs())
+		{
+			TArrayView<const FVertexInstanceID> Corners = MeshDescription.GetTriangleVertexInstances(TriangleID);
+			const FVector3f P0 = Positions[MeshDescription.GetVertexInstanceVertex(Corners[0])];
+			const FVector3f P1 = Positions[MeshDescription.GetVertexInstanceVertex(Corners[1])];
+			const FVector3f P2 = Positions[MeshDescription.GetVertexInstanceVertex(Corners[2])];
+			Orientation += FVector3f::DotProduct(FVector3f::CrossProduct(P1 - P0, P2 - P0), InstanceNormals[Corners[0]] + InstanceNormals[Corners[1]] + InstanceNormals[Corners[2]]);
+		}
+		const float FaceSign = Orientation < 0.0 ? -1.0f : 1.0f;
+
+		// 3. Triangles, face normals, angle-weighted vertex normals, adjacency
+		const int32 NumClusters = Out.Positions.Num();
+		Out.Normals.SetNumZeroed(NumClusters);
+		Out.Neighbors.SetNum(NumClusters);
+
+		for (const FTriangleID TriangleID : MeshDescription.Triangles().GetElementIDs())
+		{
+			TArrayView<const FVertexInstanceID> Corners = MeshDescription.GetTriangleVertexInstances(TriangleID);
+			int32 C[3];
+			FVector3f P[3];
+			for (int32 i = 0; i < 3; ++i)
+			{
+				C[i] = ClusterOfVertex[MeshDescription.GetVertexInstanceVertex(Corners[i]).GetValue()];
+				P[i] = Out.Positions[C[i]];
+			}
+			const FVector3f FaceNormal = FVector3f::CrossProduct(P[1] - P[0], P[2] - P[0]).GetSafeNormal() * FaceSign;
+			if (C[0] == C[1] || C[1] == C[2] || C[0] == C[2] || FaceNormal.IsNearlyZero())
+			{
+				continue; // degenerate
+			}
+
+			const int32 Triangle = Out.Triangles.Add(FIntVector(C[0], C[1], C[2]));
+			Out.Corners.Append({ Corners[0], Corners[1], Corners[2] });
+			Out.FaceNormals.Add(FaceNormal);
+
+			for (int32 i = 0; i < 3; ++i)
+			{
+				const FVector3f EdgeA = (P[(i + 1) % 3] - P[i]).GetSafeNormal();
+				const FVector3f EdgeB = (P[(i + 2) % 3] - P[i]).GetSafeNormal();
+				// Corner angle weighting: the result doesn't depend on how the faces are triangulated
+				Out.Normals[C[i]] += FaceNormal * FMath::Acos(FMath::Clamp(FVector3f::DotProduct(EdgeA, EdgeB), -1.0f, 1.0f));
+
+				const int32 A = C[i];
+				const int32 B = C[(i + 1) % 3];
+				TArray<int32, TInlineAllocator<2>>& Users = Out.EdgeTriangles.FindOrAdd(EdgeKey(A, B));
+				// First time this edge is seen: record the two vertices as neighbors
+				if (Users.IsEmpty())
+				{
+					Out.Neighbors[A].Add(B);
+					Out.Neighbors[B].Add(A);
+				}
+				Users.Add(Triangle);
+			}
+		}
+
+		for (FVector3f& Normal : Out.Normals)
+		{
+			Normal = Normal.GetSafeNormal();
+		}
+	}
+
+	/** Averages each value with its neighbors. */
+	void Blur(const FWeldedMesh& Mesh, TArray<float>& Values, int32 Passes)
+	{
+		TArray<float> Next;
+		for (int32 Pass = 0; Pass < Passes; ++Pass)
+		{
+			Next = Values;
+			for (int32 Index = 0; Index < Values.Num(); ++Index)
+			{
+				const TArray<int32>& Neighbors = Mesh.Neighbors[Index];
+				float Sum = Values[Index];
+				for (const int32 Neighbor : Neighbors)
+				{
+					Sum += Values[Neighbor];
+				}
+				Next[Index] = Sum / (Neighbors.Num() + 1);
+			}
+			Swap(Values, Next);
+		}
+	}
+
+	/**
+	 * Signed mean curvature per vertex. Along each edge the smooth normal turns by some angle; length / angle is the
+	 * radius of curvature. Normals spreading apart = convex (bright), closing in = concave (dark). 0.5 = flat.
+	 */
+	TArray<float> ComputeCurvature(const FWeldedMesh& Mesh, float FullRadius, int32 BlurPasses)
+	{
+		const int32 Num = Mesh.Positions.Num();
+		TArray<float> SumAngle;
+		TArray<float> SumLength;
+		SumAngle.SetNumZeroed(Num);
+		SumLength.SetNumZeroed(Num);
+
+		for (const TPair<uint64, TArray<int32, TInlineAllocator<2>>>& MeshEdge : Mesh.EdgeTriangles)
+		{
+			int32 A, B;
+			SplitEdgeKey(MeshEdge.Key, A, B);
+			const FVector3f& NA = Mesh.Normals[A];
+			const FVector3f& NB = Mesh.Normals[B];
+			if (NA.IsNearlyZero() || NB.IsNearlyZero())
+			{
+				continue;
+			}
+			const FVector3f Delta = Mesh.Positions[B] - Mesh.Positions[A];
+			const float Angle = FMath::Acos(FMath::Clamp(FVector3f::DotProduct(NA, NB), -1.0f, 1.0f));
+			// Normals that spread apart along the edge = convex (+), that close in = concave (-)
+			const float Sign = FVector3f::DotProduct(NB - NA, Delta) >= 0.0f ? 1.0f : -1.0f;
+			const float Length = Delta.Size();
+			SumAngle[A] += Angle * Sign;
+			SumAngle[B] += Angle * Sign;
+			SumLength[A] += Length;
+			SumLength[B] += Length;
+		}
+
+		const float Radius = FMath::Max(FullRadius, 0.001f);
+		TArray<float> Values;
+		Values.Init(0.5f, Num);
+		for (int32 Index = 0; Index < Num; ++Index)
+		{
+			if (SumLength[Index] > UE_SMALL_NUMBER)
+			{
+				const float Curvature = SumAngle[Index] / SumLength[Index]; // 1 / radius
+				// Map to 0..1: a bend of radius FullRadius (or tighter) reaches full black/white
+				Values[Index] = 0.5f + 0.5f * FMath::Clamp(Curvature * Radius, -1.0f, 1.0f);
+			}
+		}
+		Blur(Mesh, Values, BlurPasses);
+		return Values;
+	}
+
+	/**
+	 * Cavity per vertex: how far the surface sits below a smoothed copy of itself, along the normal.
+	 * Taubin smoothing (alternating shrink/inflate) so the smoothed copy doesn't shrink and turn everything convex.
+	 * 1 = flat or raised, 0 = at least Depth deep.
+	 */
+	TArray<float> ComputeCavity(const FWeldedMesh& Mesh, int32 Spread, float Depth)
+	{
+		const int32 Num = Mesh.Positions.Num();
+		TArray<FVector3f> Smoothed = Mesh.Positions;
+		TArray<FVector3f> Next;
+		Next.SetNumUninitialized(Num);
+
+		// 1. Smoothed copy of the surface: each pass shrinks toward the neighbor average (0.5) then inflates back (-0.53)
+		for (int32 Iteration = 0; Iteration < Spread; ++Iteration)
+		{
+			for (const float Factor : { 0.5f, -0.53f })
+			{
+				for (int32 Index = 0; Index < Num; ++Index)
+				{
+					const TArray<int32>& Neighbors = Mesh.Neighbors[Index];
+					if (Neighbors.IsEmpty())
+					{
+						Next[Index] = Smoothed[Index];
+						continue;
+					}
+					FVector3f Average = FVector3f::ZeroVector;
+					for (const int32 Neighbor : Neighbors)
+					{
+						Average += Smoothed[Neighbor];
+					}
+					Average /= static_cast<float>(Neighbors.Num());
+					Next[Index] = Smoothed[Index] + (Average - Smoothed[Index]) * Factor;
+				}
+				Swap(Smoothed, Next);
+			}
+		}
+
+		// 2. Height of each vertex above the smoothed surface, along the normal. Below = cavity
+		const float SafeDepth = FMath::Max(Depth, 0.0001f);
+		TArray<float> Values;
+		Values.Init(1.0f, Num);
+		for (int32 Index = 0; Index < Num; ++Index)
+		{
+			const float Height = FVector3f::DotProduct(Mesh.Normals[Index], Mesh.Positions[Index] - Smoothed[Index]);
+			Values[Index] = 1.0f - FMath::Clamp(-Height / SafeDepth, 0.0f, 1.0f);
+		}
+		Blur(Mesh, Values, 1);
+		return Values;
+	}
+
+	/** A crease as a 3D segment with its strength (0..1). */
+	struct FSharpEdge
+	{
+		FVector3f A;
+		FVector3f B;
+		float Strength;
+	};
+
+	/** Creases between two faces, with 0..1 strength from the angle between them. */
+	void FindSharpEdges(const FWeldedMesh& Mesh, float MinAngle, float FullAngle, bool bConcave, TArray<FSharpEdge>& OutEdges, TArray<TArray<int32>>& OutEdgesOfVertex)
+	{
+		OutEdgesOfVertex.SetNum(Mesh.Positions.Num());
+
+		for (const TPair<uint64, TArray<int32, TInlineAllocator<2>>>& MeshEdge : Mesh.EdgeTriangles)
+		{
+			if (MeshEdge.Value.Num() != 2)
+			{
+				continue; // open border or non-manifold
+			}
+			int32 A, B;
+			SplitEdgeKey(MeshEdge.Key, A, B);
+
+			const int32 T1 = MeshEdge.Value[0];
+			const int32 T2 = MeshEdge.Value[1];
+			const float Angle = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FVector3f::DotProduct(Mesh.FaceNormals[T1], Mesh.FaceNormals[T2]), -1.0f, 1.0f)));
+
+			// Strength ramps from 0 at MinAngle to 1 at FullAngle
+			const float Strength = FullAngle > MinAngle
+				? FMath::Clamp((Angle - MinAngle) / (FullAngle - MinAngle), 0.0f, 1.0f)
+				: (Angle >= MinAngle ? 1.0f : 0.0f);
+			if (Strength <= 0.0f)
+			{
+				continue;
+			}
+
+			// Convex if the far corner of the second face sits below the first face's plane
+			const FIntVector& Other = Mesh.Triangles[T2];
+			const int32 Opposite = (Other.X != A && Other.X != B) ? Other.X : (Other.Y != A && Other.Y != B) ? Other.Y : Other.Z;
+			const bool bConvex = FVector3f::DotProduct(Mesh.FaceNormals[T1], Mesh.Positions[Opposite] - Mesh.Positions[A]) < 0.0f;
+			if (!bConvex && !bConcave)
+			{
+				continue;
+			}
+
+			const int32 Index = OutEdges.Add({ Mesh.Positions[A], Mesh.Positions[B], Strength });
+			OutEdgesOfVertex[A].Add(Index);
+			OutEdgesOfVertex[B].Add(Index);
+		}
+	}
+
+	/** Shortest distance from a point to segment AB. */
+	float DistanceToSegment(const FVector3f& Point, const FVector3f& A, const FVector3f& B)
+	{
+		const FVector3f AB = B - A;
+		const float LengthSq = AB.SizeSquared();
+		const float T = LengthSq > UE_SMALL_NUMBER ? FMath::Clamp(FVector3f::DotProduct(Point - A, AB) / LengthSq, 0.0f, 1.0f) : 0.0f;
+		return FVector3f::Dist(Point, A + AB * T);
+	}
+
+	using VrrCore::EdgeFunction;
+	inline uint8 ToByte(float Value) { return VrrCore::ToByte01(Value); }
+
+	/** Index of each map in the per-map arrays below. */
+	enum EMap : int32 { Cavity, Edge, Curvature, NumMaps };
+
+	/** One bake: the settings plus the mesh they apply to. */
+	class FJob : public FMeshMapBakeSettings
+	{
+	public:
+		FJob(UObject* InMesh, const FMeshMapBakeSettings& InSettings)
+			: FMeshMapBakeSettings(InSettings), Mesh(InMesh) {}
+
+		bool Bake(FMeshMapBakeResult& OutResult);
+
+	private:
+		TWeakObjectPtr<UObject> Mesh;
+
+		/**
+		 * Creates (or with bOverwrite, updates) a linear texture. Pixels are G8 (one byte per texel) or, with bPacked, BGRA8.
+		 * Returns null on failure.
+		 */
+		UTexture2D* WriteTexture(const FString& Suffix, int32 Size, const TArray<uint8>& Pixels, bool bPacked, FText& OutError) const;
+	};
+
+	/**
+	 * Saves one baked map:
+	 *  1. with Overwrite on, reuse the existing texture of that name (materials keep their reference),
+	 *  2. otherwise create a new asset, skipping names that are taken,
+	 *  3. fill it with the pixels as linear data.
+	 */
+	UTexture2D* FJob::WriteTexture(const FString& Suffix, int32 Size, const TArray<uint8>& Pixels, bool bPacked, FText& OutError) const
+	{
+		const FString BaseAssetName = OutputBaseName + Suffix;
+		FString AssetName = BaseAssetName;
+		FString PackageName = OutputFolder / AssetName;
+		if (OutputBaseName.IsEmpty() || !FPackageName::IsValidLongPackageName(PackageName))
+		{
+			OutError = FText::Format(LOCTEXT("BadTexturePath", "Invalid output path: {0}"), FText::FromString(PackageName));
+			return nullptr;
+		}
+
+		UTexture2D* Texture = nullptr;
+		if (bOverwrite && (FindPackage(nullptr, *PackageName) || FPackageName::DoesPackageExist(PackageName)))
+		{
+			Texture = LoadObject<UTexture2D>(nullptr, *(PackageName + TEXT(".") + AssetName), nullptr, LOAD_NoWarn | LOAD_Quiet);
+		}
+
+		if (!Texture)
+		{
+			// New asset; skip names taken (or held by something that isn't a texture)
+			for (int32 Index = 1; FindPackage(nullptr, *PackageName) || FPackageName::DoesPackageExist(PackageName); ++Index)
+			{
+				AssetName = FString::Printf(TEXT("%s_%02d"), *BaseAssetName, Index);
+				PackageName = OutputFolder / AssetName;
+			}
+			UPackage* Package = CreatePackage(*PackageName);
+			Texture = NewObject<UTexture2D>(Package, *AssetName, RF_Public | RF_Standalone | RF_Transactional);
+			FAssetRegistryModule::AssetCreated(Texture);
+		}
+
+		Texture->Modify();
+		Texture->PreEditChange(nullptr);
+		Texture->Source.Init(Size, Size, 1, 1, bPacked ? TSF_BGRA8 : TSF_G8, Pixels.GetData());
+
+		// Linear data: a channel-packed mask, or a single grayscale channel
+		Texture->SRGB = false;
+		Texture->CompressionSettings = bPacked ? TC_Masks : TC_Grayscale;
+		Texture->PostEditChange();
+		Texture->MarkPackageDirty();
+		return Texture;
+	}
+
+	/**
+	 * The whole bake: validate inputs, then 1. analyze the mesh, 2. rasterize, 3. pad, 4. write textures, 5. report.
+	 * Unchecked maps cost nothing: their arrays stay empty and are skipped.
+	 */
+	bool FJob::Bake(FMeshMapBakeResult& OutResult)
+	{
+		const FMeshDescription* MeshDescription = VrrCore::GetMeshDescription(Mesh.Get(), 0);
+		if (!MeshDescription)
+		{
+			OutResult.Message = LOCTEXT("NoMeshData", "Pick a Static or Skeletal Mesh with source mesh data for LOD 0.");
+			return false;
+		}
+		if (!HasAnyMap())
+		{
+			OutResult.Message = LOCTEXT("NoMaps", "Check at least one map to bake.");
+			return false;
+		}
+
+		FStaticMeshConstAttributes Attributes(*MeshDescription);
+		TVertexInstanceAttributesConstRef<FVector2f> UVs = Attributes.GetVertexInstanceUVs();
+		if (UVChannel >= UVs.GetNumChannels())
+		{
+			OutResult.Message = FText::Format(LOCTEXT("NoUVChannel", "The mesh has no UV channel {0}."), UVChannel);
+			return false;
+		}
+
+		const bool bMap[NumMaps] = { bBakeCavity, bBakeEdge, bBakeCurvature };
+		// Neutral value per map where nothing is baked: no cavity (white), no edge (black), flat (gray)
+		const float Background[NumMaps] = { 1.0f, 0.0f, 0.5f };
+		const TCHAR* Suffix[NumMaps] = { TEXT("_Cavity"), TEXT("_Edge"), TEXT("_Curvature") };
+
+		FScopedSlowTask SlowTask(5.0f, LOCTEXT("BakingMaps", "Baking mesh maps..."));
+		SlowTask.MakeDialog();
+
+		// 1. Mesh analysis
+		SlowTask.EnterProgressFrame(1.0f, LOCTEXT("Analyzing", "Analyzing mesh..."));
+		FWeldedMesh Welded;
+		BuildWeldedMesh(*MeshDescription, WeldDistance, Welded);
+
+		TArray<float> VertexValues[NumMaps];
+		if (bBakeCavity)
+		{
+			VertexValues[Cavity] = ComputeCavity(Welded, CavitySpread, CavityDepth);
+		}
+		if (bBakeCurvature)
+		{
+			VertexValues[Curvature] = ComputeCurvature(Welded, CurvatureRadius, CurvatureBlur);
+		}
+		TArray<FSharpEdge> SharpEdges;
+		TArray<TArray<int32>> SharpEdgesOfVertex;
+		if (bBakeEdge)
+		{
+			FindSharpEdges(Welded, EdgeMinAngle, EdgeFullAngle, bEdgeConcave, SharpEdges, SharpEdgesOfVertex);
+		}
+
+		// 2. Rasterize every triangle in UV space
+		SlowTask.EnterProgressFrame(2.0f, LOCTEXT("Rasterizing", "Rasterizing..."));
+		const int32 Size = Resolution;
+		const int32 NumTexels = Size * Size;
+		TArray<float> Texels[NumMaps];
+		for (int32 Map = 0; Map < NumMaps; ++Map)
+		{
+			if (bMap[Map])
+			{
+				Texels[Map].Init(Background[Map], NumTexels);
+			}
+		}
+		TArray<int32> Owner;
+		// Which triangle last wrote each texel: marks filled texels and detects overlapping UVs
+		Owner.Init(INDEX_NONE, NumTexels);
+		int32 NumConflicts = 0;
+		int32 NumOutOfRange = 0;
+		const float SafeEdgeWidth = FMath::Max(EdgeWidth, 0.0001f);
+		TArray<int32> CandidateEdges;
+
+		for (int32 Triangle = 0; Triangle < Welded.Triangles.Num(); ++Triangle)
+		{
+			const FIntVector& Tri = Welded.Triangles[Triangle];
+			const int32 C[3] = { Tri.X, Tri.Y, Tri.Z };
+
+			FVector2f Pixel[3];
+			bool bOutOfRange = false;
+			for (int32 i = 0; i < 3; ++i)
+			{
+				// UV corners in texel units
+				const FVector2f UV = UVs.Get(Welded.Corners[Triangle * 3 + i], UVChannel);
+				bOutOfRange |= UV.X < -0.001f || UV.X > 1.001f || UV.Y < -0.001f || UV.Y > 1.001f;
+				Pixel[i] = UV * static_cast<float>(Size);
+			}
+			NumOutOfRange += bOutOfRange ? 1 : 0;
+
+			const float Area = EdgeFunction(Pixel[0], Pixel[1], Pixel[2]);
+			if (FMath::Abs(Area) < UE_SMALL_NUMBER)
+			{
+				continue;
+			}
+
+			// Creases that can reach into this triangle: those touching any of its corners
+			CandidateEdges.Reset();
+			if (bBakeEdge)
+			{
+				for (int32 i = 0; i < 3; ++i)
+				{
+					for (const int32 SharpIndex : SharpEdgesOfVertex[C[i]])
+					{
+						CandidateEdges.AddUnique(SharpIndex);
+					}
+				}
+			}
+
+			const int32 MinX = FMath::Clamp(FMath::FloorToInt32(FMath::Min3(Pixel[0].X, Pixel[1].X, Pixel[2].X)), 0, Size - 1);
+			const int32 MaxX = FMath::Clamp(FMath::CeilToInt32(FMath::Max3(Pixel[0].X, Pixel[1].X, Pixel[2].X)), 0, Size - 1);
+			const int32 MinY = FMath::Clamp(FMath::FloorToInt32(FMath::Min3(Pixel[0].Y, Pixel[1].Y, Pixel[2].Y)), 0, Size - 1);
+			const int32 MaxY = FMath::Clamp(FMath::CeilToInt32(FMath::Max3(Pixel[0].Y, Pixel[1].Y, Pixel[2].Y)), 0, Size - 1);
+
+			for (int32 Y = MinY; Y <= MaxY; ++Y)
+			{
+				for (int32 X = MinX; X <= MaxX; ++X)
+				{
+					// Barycentric weights of the texel center; skip texels outside the triangle
+					const FVector2f Center(X + 0.5f, Y + 0.5f);
+					const float W0 = EdgeFunction(Pixel[1], Pixel[2], Center) / Area;
+					const float W1 = EdgeFunction(Pixel[2], Pixel[0], Center) / Area;
+					const float W2 = 1.0f - W0 - W1;
+					constexpr float Epsilon = -1e-4f;
+					if (W0 < Epsilon || W1 < Epsilon || W2 < Epsilon)
+					{
+						continue;
+					}
+
+					const int32 Index = Y * Size + X;
+
+					// Overlapping or mirrored UVs: an unconnected part of the mesh already wrote this texel
+					const int32 Previous = Owner[Index];
+					if (Previous != INDEX_NONE && Previous != Triangle)
+					{
+						const FIntVector& Other = Welded.Triangles[Previous];
+						bool bConnected = false;
+						for (int32 i = 0; i < 3; ++i)
+						{
+							bConnected |= C[i] == Other.X || C[i] == Other.Y || C[i] == Other.Z;
+						}
+						NumConflicts += bConnected ? 0 : 1;
+					}
+					Owner[Index] = Triangle;
+
+					// Vertex maps: blend the three corner values
+					for (const int32 Map : { Cavity, Curvature })
+					{
+						if (bMap[Map])
+						{
+							const TArray<float>& V = VertexValues[Map];
+							Texels[Map][Index] = V[C[0]] * W0 + V[C[1]] * W1 + V[C[2]] * W2;
+						}
+					}
+
+					// Edge map: distance from this texel's 3D position to the nearest crease, faded out over EdgeWidth
+					if (bBakeEdge)
+					{
+						const FVector3f Position = Welded.Positions[C[0]] * W0 + Welded.Positions[C[1]] * W1 + Welded.Positions[C[2]] * W2;
+						float Value = 0.0f;
+						for (const int32 SharpIndex : CandidateEdges)
+						{
+							const FSharpEdge& Sharp = SharpEdges[SharpIndex];
+							const float Distance = DistanceToSegment(Position, Sharp.A, Sharp.B);
+							Value = FMath::Max(Value, Sharp.Strength * (1.0f - FMath::SmoothStep(0.0f, SafeEdgeWidth, Distance)));
+						}
+						Texels[Edge][Index] = Value;
+					}
+				}
+			}
+		}
+
+		// 3. Pad the islands so filtering and mips at their edges stay on valid data
+		SlowTask.EnterProgressFrame(1.0f, LOCTEXT("Padding", "Padding islands..."));
+		TBitArray<> Filled(false, NumTexels);
+		for (int32 Index = 0; Index < NumTexels; ++Index)
+		{
+			Filled[Index] = Owner[Index] != INDEX_NONE;
+		}
+		// Each pass fills empty texels next to filled ones with their average, growing the islands by one texel
+		TArray<int32> NewlyFilled;
+		for (int32 Pass = 0; Pass < Padding; ++Pass)
+		{
+			NewlyFilled.Reset();
+			for (int32 Y = 0; Y < Size; ++Y)
+			{
+				for (int32 X = 0; X < Size; ++X)
+				{
+					const int32 Index = Y * Size + X;
+					if (Filled[Index])
+					{
+						continue;
+					}
+
+					float Sum[NumMaps] = { 0.0f, 0.0f, 0.0f };
+					int32 Count = 0;
+					for (int32 DY = -1; DY <= 1; ++DY)
+					{
+						for (int32 DX = -1; DX <= 1; ++DX)
+						{
+							const int32 NX = X + DX;
+							const int32 NY = Y + DY;
+							if ((DX || DY) && NX >= 0 && NX < Size && NY >= 0 && NY < Size && Filled[NY * Size + NX])
+							{
+								for (int32 Map = 0; Map < NumMaps; ++Map)
+								{
+									Sum[Map] += bMap[Map] ? Texels[Map][NY * Size + NX] : 0.0f;
+								}
+								++Count;
+							}
+						}
+					}
+					if (Count > 0)
+					{
+						for (int32 Map = 0; Map < NumMaps; ++Map)
+						{
+							if (bMap[Map])
+							{
+								Texels[Map][Index] = Sum[Map] / Count;
+							}
+						}
+						NewlyFilled.Add(Index);
+					}
+				}
+			}
+			if (NewlyFilled.IsEmpty())
+			{
+				break;
+			}
+			for (const int32 Index : NewlyFilled)
+			{
+				Filled[Index] = true;
+			}
+		}
+
+		// 4. Write the textures
+		SlowTask.EnterProgressFrame(1.0f, LOCTEXT("CreatingTextures", "Creating textures..."));
+		TArray<FString> Names;
+		TArray<uint8> Pixels;
+
+		auto Write = [&](const FString& TextureSuffix, bool bPacked) -> bool
+		{
+			FText Error;
+			UTexture2D* Texture = WriteTexture(TextureSuffix, Size, Pixels, bPacked, Error);
+			if (!Texture)
+			{
+				OutResult.Message = Error;
+				return false;
+			}
+			OutResult.Textures.Add(Texture);
+			Names.Add(Texture->GetName());
+			return true;
+		};
+
+		// Unchecked maps get their neutral value in the packed texture
+		auto TexelValue = [&](int32 Map, int32 Index) { return bMap[Map] ? Texels[Map][Index] : Background[Map]; };
+
+		if (!bSplitTextures)
+		{
+			// One mask: R Curvature, G Cavity, B Edge (BGRA byte order)
+			Pixels.SetNumUninitialized(NumTexels * 4);
+			for (int32 Index = 0; Index < NumTexels; ++Index)
+			{
+				Pixels[Index * 4 + 0] = ToByte(TexelValue(Edge, Index));
+				Pixels[Index * 4 + 1] = ToByte(TexelValue(Cavity, Index));
+				Pixels[Index * 4 + 2] = ToByte(TexelValue(Curvature, Index));
+				Pixels[Index * 4 + 3] = 255;
+			}
+			if (!Write(TEXT("_CCE"), true))
+			{
+				return false;
+			}
+		}
+		else
+		{
+			for (int32 Map = 0; Map < NumMaps; ++Map)
+			{
+				if (!bMap[Map])
+				{
+					continue;
+				}
+				Pixels.SetNumUninitialized(NumTexels);
+				for (int32 Index = 0; Index < NumTexels; ++Index)
+				{
+					Pixels[Index] = ToByte(Texels[Map][Index]);
+				}
+				if (!Write(Suffix[Map], false))
+				{
+					return false;
+				}
+			}
+		}
+
+		// 5. Summary, plus notes for anything that went wrong
+		FText Message = FText::Format(LOCTEXT("MapsBaked", "Baked {0} ({1}x{1}, UV {2}). Save the textures to keep them."),
+			FText::FromString(FString::Join(Names, TEXT(", "))), Size, UVChannel);
+		if (bBakeEdge && SharpEdges.IsEmpty())
+		{
+			Message = FText::Format(LOCTEXT("NoEdges", "{0} No creases reached the start angle, so the edge map is black."), Message);
+		}
+		if (NumConflicts > 0)
+		{
+			Message = FText::Format(LOCTEXT("ConflictNote", "{0} Warning: {1} texels are shared by separate parts of the mesh (overlapping or mirrored UVs); those areas mix values. Use a UV channel with unique UVs."),
+				Message, NumConflicts);
+		}
+		if (NumOutOfRange > 0)
+		{
+			Message = FText::Format(LOCTEXT("OutOfRangeNote", "{0} {1} triangles have UVs outside 0-1 and were clipped."), Message, NumOutOfRange);
+		}
+		OutResult.Message = Message;
+		return true;
+	}
+}
+
+namespace MeshMapBaker
+{
+	/** SM_Rock -> T_Rock (the bake adds _CCE, _Cavity, ...). */
+	FString SuggestBaseName(const UObject* Mesh)
+	{
+		return FString::Printf(TEXT("T_%s"), *VrrCore::GetBaseAssetName(Mesh));
+	}
+
+	/** Entry point: bakes the checked maps for LOD 0 of the mesh. */
+	FMeshMapBakeResult Bake(UObject* Mesh, const FMeshMapBakeSettings& Settings)
+	{
+		FMeshMapBakeResult Result;
+		BakeMapsImpl::FJob Job(Mesh, Settings);
+		Result.bSuccess = Job.Bake(Result);
+		return Result;
+	}
+}
+
+#undef LOCTEXT_NAMESPACE

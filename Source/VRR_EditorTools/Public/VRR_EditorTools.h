@@ -58,4 +58,25 @@ protected:
 
 private:
 	TSharedPtr<class FUICommandList> EditorToolsCommandList;
+
+	// Pages shown in the Toolbox main area, picked from the left toolbar (value = page switcher index)
+	enum class EToolPage : int32 { TexturePacker, TextureValidator, BakeNormals, BakeMaps, ControlRig };
+	EToolPage ActivePage = EToolPage::TextureValidator;
+
+	/** What the sidebar tab and the header show for a page. */
+	struct FPageInfo
+	{
+		EToolPage Page;
+		FText TabLabel;		// short, under the sidebar icon
+		FText Title;		// header title
+		FText Description;	// header subtitle
+		FName Icon;			// brush in FVRR_EditorToolsStyle
+	};
+
+	/** Every page, in sidebar order. */
+	static const TArray<FPageInfo>& GetPages();
+	static const FPageInfo& GetPageInfo(EToolPage Page);
+
+	/** One sidebar tab: icon over label, highlighted with an accent bar while its page is shown. */
+	TSharedRef<SWidget> CreatePageTab(const FPageInfo& Info);
 };

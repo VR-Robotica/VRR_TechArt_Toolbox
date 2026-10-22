@@ -8,8 +8,8 @@ void FVRR_EditorToolsCommands::RegisterCommands()
 	UI_COMMAND
 	(
 		CMD_OpenPopUpWindow,				// Unique Name of Commands
-		"God Tools",						// Label
-		"Bring up the God window",			// Tooltip
+		"Toolbox",						// Label
+		"Open the TechArt Toolbox",			// Tooltip
 		EUserInterfaceActionType::Button,	// UI Representation
 		FInputChord()						// Keyboard Shortcut
 	);

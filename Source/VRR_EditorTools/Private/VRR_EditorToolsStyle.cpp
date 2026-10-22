@@ -4,6 +4,9 @@
 #include "Slate/SlateGameResources.h"
 #include "Interfaces/IPluginManager.h"
 #include "Styling/SlateStyleMacros.h"
+#include "Brushes/SlateRoundedBoxBrush.h"
+#include "Misc/Paths.h"
+#include "Styling/StyleColors.h"
 
 #define RootToContentDir Style->RootToContentDir
 
@@ -33,7 +36,6 @@ FName FVRR_EditorToolsStyle::GetStyleSetName()
 
 const FVector2D Icon16x16(16.0f, 16.0f);
 const FVector2D Icon20x20(20.0f, 20.0f);
-//const FVector2D Header512(512.0f, 256.0f);
 
 TSharedRef< FSlateStyleSet > FVRR_EditorToolsStyle::Create()
 {
@@ -41,7 +43,38 @@ TSharedRef< FSlateStyleSet > FVRR_EditorToolsStyle::Create()
 	Style->SetContentRoot(IPluginManager::Get().FindPlugin("VRR_EditorTools")->GetBaseDir() / TEXT("Resources"));
 
 	Style->Set("OpenPluginWindow", new IMAGE_BRUSH(TEXT("Icon128.png"), Icon20x20));
-	//Style->Set("VRR_EditorTools.Header", new FSlateImageBrush((TEXT("LOGO_CDPR"), TEXT(".png")), FVector2D(512.0f, 128.0f)));
+
+	// GOD TOOLS WINDOW
+	// Header logo: LOGO.png is 1024 x 256, shown at a quarter size
+	Style->Set("VrrTools.Logo", new IMAGE_BRUSH(TEXT("LOGO"), FVector2D(256.0f, 64.0f)));
+
+	// Frame (header bar and sidebar) sits one shade above the window background
+	Style->Set("VrrTools.Frame", new FSlateColorBrush(FStyleColors::Recessed));
+
+	// Cards group each section of a page
+	Style->Set("VrrTools.Card", new FSlateRoundedBoxBrush(FStyleColors::Panel, 6.0f, FStyleColors::Header, 1.0f));
+
+	// Pill behind badges (counts, states); white so each badge tints it
+	Style->Set("VrrTools.Badge", new FSlateRoundedBoxBrush(FLinearColor::White, 9.0f));
+
+	// Sidebar tabs: flat until hovered; the active tab gets a filled background and an accent bar
+	Style->Set("VrrTools.Tab", FButtonStyle()
+		.SetNormal(FSlateNoResource())
+		.SetHovered(FSlateRoundedBoxBrush(FStyleColors::Panel, 4.0f))
+		.SetPressed(FSlateRoundedBoxBrush(FStyleColors::Header, 4.0f))
+		.SetNormalPadding(FMargin(0.0f))
+		.SetPressedPadding(FMargin(0.0f)));
+	Style->Set("VrrTools.Tab.Active", new FSlateRoundedBoxBrush(FStyleColors::Header, 4.0f));
+	Style->Set("VrrTools.Tab.Accent", new FSlateRoundedBoxBrush(FStyleColors::Primary, 1.5f));
+
+	// Page icons: the editor's own monochrome icons, so they can be tinted for the active/inactive state
+	const FString StarshipDir = FPaths::EngineContentDir() / TEXT("Editor/Slate/Starship");
+	auto PageIcon = [&StarshipDir](const TCHAR* Path) { return new FSlateVectorImageBrush(StarshipDir / Path, FVector2D(20.0f, 20.0f)); };
+	Style->Set("VrrTools.Page.Validate", PageIcon(TEXT("Common/validate.svg")));
+	Style->Set("VrrTools.Page.Packer", PageIcon(TEXT("AssetIcons/Texture2DArray_16.svg")));
+	Style->Set("VrrTools.Page.Normals", PageIcon(TEXT("AssetIcons/StaticMesh_16.svg")));
+	Style->Set("VrrTools.Page.MeshMaps", PageIcon(TEXT("AssetIcons/Material_16.svg")));
+	Style->Set("VrrTools.Page.Rig", PageIcon(TEXT("AssetIcons/Skeleton_16.svg")));
 
 	return Style;
 }
