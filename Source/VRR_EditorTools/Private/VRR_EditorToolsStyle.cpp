@@ -73,6 +73,8 @@ TSharedRef< FSlateStyleSet > FVRR_EditorToolsStyle::Create()
 	Style->Set("VrrTools.Page.Validate", PageIcon(TEXT("Common/validate.svg")));
 	Style->Set("VrrTools.Page.Packer", PageIcon(TEXT("AssetIcons/Texture2DArray_16.svg")));
 	Style->Set("VrrTools.Page.Normals", PageIcon(TEXT("AssetIcons/StaticMesh_16.svg")));
+	Style->Set("VrrTools.Page.UVLayout", PageIcon(TEXT("Common/SetDrawUVs.svg")));
+	Style->Set("VrrTools.Page.Rebake", PageIcon(TEXT("AssetIcons/Texture2D_16.svg")));
 	Style->Set("VrrTools.Page.MeshMaps", PageIcon(TEXT("AssetIcons/Material_16.svg")));
 	Style->Set("VrrTools.Page.Rig", PageIcon(TEXT("AssetIcons/Skeleton_16.svg")));
 

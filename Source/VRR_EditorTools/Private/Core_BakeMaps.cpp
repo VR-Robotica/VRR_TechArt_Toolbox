@@ -1,7 +1,7 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 /*
- * Mesh map baking: Cavity, Edge and Curvature masks computed from the mesh itself (no high-poly source).
+ * Mesh map baking: Cavity, Edge, Curvature and Ambient Occlusion masks computed from the mesh itself (no high-poly source).
  * Materials use them for toon details: dark crevices, bright worn edges, rim tints on convex areas.
  *
  * Process
@@ -12,14 +12,17 @@
  *       Cavity    - how far a vertex sits below a smoothed copy of the surface (dark = recessed).
  *     Edge is different: it comes from creases (sharp angles between faces) and is measured per texel
  *     as the distance to the nearest crease, so the line width doesn't depend on the vertex density.
+ *     Ambient Occlusion is also per texel: rays cast over the hemisphere above it against a BVH of the mesh.
  *  3. Rasterize every triangle in UV space, blending the vertex values with barycentric weights.
- *  4. Pad the UV islands outward so filtering and mips at island borders don't pull in background.
- *  5. Write one packed _CCE mask (R Curvature, G Cavity, B Edge) or one grayscale texture per map.
+ *  4. Trace AO for every covered texel (in parallel), then smooth it within connected surface.
+ *  5. Pad the UV islands outward so filtering and mips at island borders don't pull in background.
+ *  6. Write one packed mask (_CCE: R Curvature, G Cavity, B Edge; _CCEA adds A AO) or one grayscale texture per map.
  */
 
 #include "Core_BakeMaps.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "Async/ParallelFor.h"
 #include "Core_Common.h"
 #include "Engine/Texture2D.h"
 #include "MeshDescription.h"
@@ -27,6 +30,8 @@
 #include "Misc/ScopedSlowTask.h"
 #include "StaticMeshAttributes.h"
 #include "UObject/Package.h"
+
+#include <algorithm>
 
 #define LOCTEXT_NAMESPACE "MeshMapBaker"
 
@@ -352,11 +357,268 @@ namespace BakeMapsImpl
 		return FVector3f::Dist(Point, A + AB * T);
 	}
 
+	/**
+	 * Bounding volume hierarchy over the welded triangles, for the AO rays.
+	 * Built by median split on the longest axis, so its depth stays near log2(triangles).
+	 */
+	class FTriangleBVH
+	{
+	public:
+		void Build(const FWeldedMesh& Mesh)
+		{
+			const int32 NumTriangles = Mesh.Triangles.Num();
+			TArray<int32> Order;
+			TArray<FVector3f> Centroids;
+			Order.SetNumUninitialized(NumTriangles);
+			Centroids.SetNumUninitialized(NumTriangles);
+			for (int32 Triangle = 0; Triangle < NumTriangles; ++Triangle)
+			{
+				const FIntVector& Tri = Mesh.Triangles[Triangle];
+				Order[Triangle] = Triangle;
+				Centroids[Triangle] = (Mesh.Positions[Tri.X] + Mesh.Positions[Tri.Y] + Mesh.Positions[Tri.Z]) / 3.0f;
+			}
+
+			Nodes.Reset();
+			Nodes.Reserve(FMath::Max(1, NumTriangles * 2 / LeafSize + 1));
+			Nodes.AddDefaulted();
+			// (node, first, count) still to split
+			TArray<FIntVector, TInlineAllocator<64>> Pending;
+			Pending.Add(FIntVector(0, 0, NumTriangles));
+			while (!Pending.IsEmpty())
+			{
+				const FIntVector Work = Pending.Pop(EAllowShrinking::No);
+				const int32 First = Work.Y;
+				const int32 Count = Work.Z;
+
+				FVector3f Min(UE_BIG_NUMBER), Max(-UE_BIG_NUMBER), CentroidMin(UE_BIG_NUMBER), CentroidMax(-UE_BIG_NUMBER);
+				for (int32 i = First; i < First + Count; ++i)
+				{
+					const FIntVector& Tri = Mesh.Triangles[Order[i]];
+					for (const int32 Corner : { Tri.X, Tri.Y, Tri.Z })
+					{
+						Min = Min.ComponentMin(Mesh.Positions[Corner]);
+						Max = Max.ComponentMax(Mesh.Positions[Corner]);
+					}
+					CentroidMin = CentroidMin.ComponentMin(Centroids[Order[i]]);
+					CentroidMax = CentroidMax.ComponentMax(Centroids[Order[i]]);
+				}
+				Nodes[Work.X].Min = Min;
+				Nodes[Work.X].Max = Max;
+
+				const FVector3f Extent = CentroidMax - CentroidMin;
+				if (Count <= LeafSize || Extent.GetMax() <= UE_SMALL_NUMBER)
+				{
+					Nodes[Work.X].First = First;
+					Nodes[Work.X].Count = Count;
+					continue;
+				}
+
+				// Split at the median centroid along the longest axis; children are stored next to each other
+				const int32 Axis = Extent.X >= Extent.Y && Extent.X >= Extent.Z ? 0 : (Extent.Y >= Extent.Z ? 1 : 2);
+				const int32 Half = Count / 2;
+				int32* Begin = Order.GetData() + First;
+				std::nth_element(Begin, Begin + Half, Begin + Count, [&Centroids, Axis](int32 A, int32 B) { return Centroids[A][Axis] < Centroids[B][Axis]; });
+
+				const int32 Left = Nodes.AddDefaulted(2);
+				Nodes[Work.X].First = Left;
+				Nodes[Work.X].Count = 0;
+				Pending.Add(FIntVector(Left, First, Half));
+				Pending.Add(FIntVector(Left + 1, First + Half, Count - Half));
+			}
+
+			// Triangle data in leaf order, ready for the ray test
+			Triangles.SetNumUninitialized(NumTriangles);
+			for (int32 i = 0; i < NumTriangles; ++i)
+			{
+				const FIntVector& Tri = Mesh.Triangles[Order[i]];
+				const FVector3f& P0 = Mesh.Positions[Tri.X];
+				Triangles[i] = { P0, Mesh.Positions[Tri.Y] - P0, Mesh.Positions[Tri.Z] - P0, Mesh.FaceNormals[Order[i]] };
+			}
+		}
+
+		/** Distance to the nearest hit within MaxDistance, or -1 when the ray escapes. */
+		float Trace(const FVector3f& Origin, const FVector3f& Direction, float MaxDistance, bool bIgnoreBackFaces) const
+		{
+			if (Nodes.IsEmpty())
+			{
+				return -1.0f;
+			}
+			const FVector3f InvDirection(SafeInverse(Direction.X), SafeInverse(Direction.Y), SafeInverse(Direction.Z));
+			float Nearest = MaxDistance;
+			bool bHit = false;
+
+			int32 Stack[64];
+			int32 StackSize = 0;
+			Stack[StackSize++] = 0;
+			while (StackSize > 0)
+			{
+				const FNode& Node = Nodes[Stack[--StackSize]];
+				if (!HitsBox(Node, Origin, InvDirection, Nearest))
+				{
+					continue;
+				}
+				if (Node.Count == 0)
+				{
+					Stack[StackSize++] = Node.First;
+					Stack[StackSize++] = Node.First + 1;
+					continue;
+				}
+				for (int32 i = Node.First; i < Node.First + Node.Count; ++i)
+				{
+					const FTriangle& Tri = Triangles[i];
+					if (bIgnoreBackFaces && FVector3f::DotProduct(Direction, Tri.Normal) > 0.0f)
+					{
+						continue;
+					}
+					// Moller-Trumbore
+					const FVector3f P = FVector3f::CrossProduct(Direction, Tri.E2);
+					const float Det = FVector3f::DotProduct(Tri.E1, P);
+					if (FMath::Abs(Det) < 1e-12f)
+					{
+						continue;
+					}
+					const float InvDet = 1.0f / Det;
+					const FVector3f T = Origin - Tri.V0;
+					const float U = FVector3f::DotProduct(T, P) * InvDet;
+					if (U < 0.0f || U > 1.0f)
+					{
+						continue;
+					}
+					const FVector3f Q = FVector3f::CrossProduct(T, Tri.E1);
+					const float V = FVector3f::DotProduct(Direction, Q) * InvDet;
+					if (V < 0.0f || U + V > 1.0f)
+					{
+						continue;
+					}
+					const float Distance = FVector3f::DotProduct(Tri.E2, Q) * InvDet;
+					if (Distance > 1e-5f && Distance < Nearest)
+					{
+						Nearest = Distance;
+						bHit = true;
+					}
+				}
+			}
+			return bHit ? Nearest : -1.0f;
+		}
+
+	private:
+		static constexpr int32 LeafSize = 4;
+
+		/** Interior node: Count 0, children at First and First + 1. Leaf: Triangles[First, First + Count). */
+		struct FNode
+		{
+			FVector3f Min = FVector3f::ZeroVector;
+			FVector3f Max = FVector3f::ZeroVector;
+			int32 First = 0;
+			int32 Count = 0;
+		};
+		struct FTriangle
+		{
+			FVector3f V0, E1, E2, Normal;
+		};
+		TArray<FNode> Nodes;
+		TArray<FTriangle> Triangles;
+
+		static float SafeInverse(float Value)
+		{
+			return FMath::Abs(Value) > 1e-12f ? 1.0f / Value : (Value >= 0.0f ? UE_BIG_NUMBER : -UE_BIG_NUMBER);
+		}
+
+		/** Slab test: does the ray reach the box before MaxDistance? */
+		static bool HitsBox(const FNode& Node, const FVector3f& Origin, const FVector3f& InvDirection, float MaxDistance)
+		{
+			float Near = 0.0f;
+			float Far = MaxDistance;
+			for (int32 Axis = 0; Axis < 3; ++Axis)
+			{
+				float T0 = (Node.Min[Axis] - Origin[Axis]) * InvDirection[Axis];
+				float T1 = (Node.Max[Axis] - Origin[Axis]) * InvDirection[Axis];
+				if (T0 > T1)
+				{
+					Swap(T0, T1);
+				}
+				Near = FMath::Max(Near, T0);
+				Far = FMath::Min(Far, T1);
+				if (Near > Far)
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+	};
+
+	/** Do two welded triangles touch (same triangle or a shared corner)? */
+	bool TrianglesTouch(const FWeldedMesh& Mesh, int32 A, int32 B)
+	{
+		if (A == B)
+		{
+			return true;
+		}
+		const FIntVector& TA = Mesh.Triangles[A];
+		const FIntVector& TB = Mesh.Triangles[B];
+		for (const int32 Corner : { TA.X, TA.Y, TA.Z })
+		{
+			if (Corner == TB.X || Corner == TB.Y || Corner == TB.Z)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Cosine-weighted hemisphere directions around +Z (Fibonacci spiral): evenly spread, so the plain fraction of
+	 * blocked rays is the occlusion.
+	 */
+	TArray<FVector3f> MakeHemisphereRays(int32 Count)
+	{
+		TArray<FVector3f> Rays;
+		Rays.SetNumUninitialized(Count);
+		const float GoldenAngle = UE_PI * (3.0f - FMath::Sqrt(5.0f));
+		for (int32 i = 0; i < Count; ++i)
+		{
+			const float U = (i + 0.5f) / Count;
+			const float Radius = FMath::Sqrt(U);
+			const float Phi = i * GoldenAngle;
+			Rays[i] = FVector3f(Radius * FMath::Cos(Phi), Radius * FMath::Sin(Phi), FMath::Sqrt(1.0f - U));
+		}
+		return Rays;
+	}
+
+	/** "m:ss" for a duration in seconds. */
+	FText FormatDuration(double Seconds)
+	{
+		const int32 Total = FMath::Max(FMath::RoundToInt32(Seconds), 0);
+		return FText::FromString(FString::Printf(TEXT("%d:%02d"), Total / 60, Total % 60));
+	}
+
+	/** Time since a stage started, for progress text like "Tracing ambient occlusion: 42%  (0:35 elapsed, about 0:48 left)". */
+	struct FBakeTimer
+	{
+		double Start = FPlatformTime::Seconds();
+
+		double Elapsed() const { return FPlatformTime::Seconds() - Start; }
+
+		FText Describe(const FText& Stage, float Fraction) const
+		{
+			const double Seconds = Elapsed();
+			const FText Percent = FText::AsPercent(Fraction);
+			// The estimate is noise until a few percent is done
+			if (Fraction < 0.02f || Seconds < 1.0)
+			{
+				return FText::Format(LOCTEXT("ProgressStart", "{0}: {1}  ({2} elapsed)"), Stage, Percent, FormatDuration(Seconds));
+			}
+			const double Left = Seconds * (1.0 - Fraction) / Fraction;
+			return FText::Format(LOCTEXT("ProgressEta", "{0}: {1}  ({2} elapsed, about {3} left)"), Stage, Percent, FormatDuration(Seconds), FormatDuration(Left));
+		}
+	};
+
 	using VrrCore::EdgeFunction;
 	inline uint8 ToByte(float Value) { return VrrCore::ToByte01(Value); }
 
 	/** Index of each map in the per-map arrays below. */
-	enum EMap : int32 { Cavity, Edge, Curvature, NumMaps };
+	enum EMap : int32 { Cavity, Edge, Curvature, AmbientOcclusion, NumMaps };
 
 	/** One bake: the settings plus the mesh they apply to. */
 	class FJob : public FMeshMapBakeSettings
@@ -371,10 +633,14 @@ namespace BakeMapsImpl
 		TWeakObjectPtr<UObject> Mesh;
 
 		/**
-		 * Creates (or with bOverwrite, updates) a linear texture. Pixels are G8 (one byte per texel) or, with bPacked, BGRA8.
+		 * Creates (or with bOverwrite, updates) a linear texture. Pixels are G8 (one byte per texel) or, with bPacked, BGRA8; bWithAlpha keeps the alpha channel.
 		 * Returns null on failure.
 		 */
-		UTexture2D* WriteTexture(const FString& Suffix, int32 Size, const TArray<uint8>& Pixels, bool bPacked, FText& OutError) const;
+		UTexture2D* WriteTexture(const FString& Suffix, int32 Size, const TArray<uint8>& Pixels, bool bPacked, bool bWithAlpha, FText& OutError) const;
+
+		/** Fills OutValues (one per texel) with AO for every texel a triangle covers. False if the user cancelled. */
+		bool TraceAmbientOcclusion(const FWeldedMesh& Welded, const FTriangleBVH& BVH, const TArray<int32>& Owner, const TArray<FVector2f>& Barycentrics,
+			int32 Size, TArray<float>& OutValues) const;
 	};
 
 	/**
@@ -383,7 +649,7 @@ namespace BakeMapsImpl
 	 *  2. otherwise create a new asset, skipping names that are taken,
 	 *  3. fill it with the pixels as linear data.
 	 */
-	UTexture2D* FJob::WriteTexture(const FString& Suffix, int32 Size, const TArray<uint8>& Pixels, bool bPacked, FText& OutError) const
+	UTexture2D* FJob::WriteTexture(const FString& Suffix, int32 Size, const TArray<uint8>& Pixels, bool bPacked, bool bWithAlpha, FText& OutError) const
 	{
 		const FString BaseAssetName = OutputBaseName + Suffix;
 		FString AssetName = BaseAssetName;
@@ -420,13 +686,155 @@ namespace BakeMapsImpl
 		// Linear data: a channel-packed mask, or a single grayscale channel
 		Texture->SRGB = false;
 		Texture->CompressionSettings = bPacked ? TC_Masks : TC_Grayscale;
+		// RGB-only mask: drop alpha so it compresses to DXT1/BC1 (half the memory of DXT5/BC3).
+		// Set either way, so overwriting a texture that was baked the other way doesn't keep the old setting.
+		Texture->CompressionNoAlpha = bPacked && !bWithAlpha;
 		Texture->PostEditChange();
 		Texture->MarkPackageDirty();
 		return Texture;
 	}
 
 	/**
-	 * The whole bake: validate inputs, then 1. analyze the mesh, 2. rasterize, 3. pad, 4. write textures, 5. report.
+	 * Ambient occlusion:
+	 *  1. per texel, rebuild the surface point and normal from its triangle and barycentric weights,
+	 *  2. cast AORays cosine-weighted rays over the hemisphere (spun per texel so the pattern becomes fine noise
+	 *     instead of banding); each blocked ray adds occlusion, less for far hits with distance falloff,
+	 *  3. smooth with AOBlur 3x3 passes, only between texels on touching triangles so separate UV islands don't mix.
+	 * Runs in chunks across all cores, updating the progress bar (with time left) and checking Cancel between chunks.
+	 */
+	bool FJob::TraceAmbientOcclusion(const FWeldedMesh& Welded, const FTriangleBVH& BVH, const TArray<int32>& Owner, const TArray<FVector2f>& Barycentrics,
+		int32 Size, TArray<float>& OutValues) const
+	{
+		const FMeshDescription* MeshDescription = VrrCore::GetMeshDescription(Mesh.Get(), 0);
+		FStaticMeshConstAttributes Attributes(*MeshDescription);
+		TVertexInstanceAttributesConstRef<FVector3f> InstanceNormals = Attributes.GetVertexInstanceNormals();
+
+		const int32 NumRays = FMath::Max(AORays, 1);
+		const TArray<FVector3f> Rays = MakeHemisphereRays(NumRays);
+		const float MaxDistance = FMath::Max(AODistance, 0.001f);
+		const float Strength = FMath::Max(AOStrength, 0.0f);
+
+		auto TraceTexel = [&](int32 Index) -> float
+		{
+			const int32 Triangle = Owner[Index];
+			const FIntVector& Tri = Welded.Triangles[Triangle];
+			const float W0 = Barycentrics[Index].X;
+			const float W1 = Barycentrics[Index].Y;
+			const float W2 = 1.0f - W0 - W1;
+
+			// 1. Surface point, face normal, and the shading normal (keeps hard edges, unlike the welded normals)
+			const FVector3f Position = Welded.Positions[Tri.X] * W0 + Welded.Positions[Tri.Y] * W1 + Welded.Positions[Tri.Z] * W2;
+			const FVector3f& FaceNormal = Welded.FaceNormals[Triangle];
+			FVector3f Normal = (InstanceNormals[Welded.Corners[Triangle * 3 + 0]] * W0
+				+ InstanceNormals[Welded.Corners[Triangle * 3 + 1]] * W1
+				+ InstanceNormals[Welded.Corners[Triangle * 3 + 2]] * W2).GetSafeNormal();
+			if (FVector3f::DotProduct(Normal, FaceNormal) <= 0.0f)
+			{
+				Normal = FaceNormal;
+			}
+
+			// Tangent frame, spun by a per-texel angle (integer hash of the texel index)
+			FVector3f Tangent, Bitangent;
+			Normal.FindBestAxisVectors(Tangent, Bitangent);
+			const float Spin = static_cast<float>((static_cast<uint32>(Index) * 2654435761u) >> 8) * (UE_TWO_PI / 16777216.0f);
+			const float Cos = FMath::Cos(Spin);
+			const float Sin = FMath::Sin(Spin);
+			const FVector3f T = Tangent * Cos + Bitangent * Sin;
+			const FVector3f B = Bitangent * Cos - Tangent * Sin;
+
+			// 2. Rays from just above the face
+			const FVector3f Origin = Position + FaceNormal * AOBias;
+			float Occlusion = 0.0f;
+			for (const FVector3f& Local : Rays)
+			{
+				FVector3f Direction = T * Local.X + B * Local.Y + Normal * Local.Z;
+				// A ray the smooth normal tilts below the face would go straight into the mesh: mirror it back up
+				const float AboveFace = FVector3f::DotProduct(Direction, FaceNormal);
+				if (AboveFace < 0.01f)
+				{
+					Direction = (Direction - FaceNormal * (2.0f * AboveFace - 0.01f)).GetSafeNormal();
+				}
+				const float Hit = BVH.Trace(Origin, Direction, MaxDistance, bAOIgnoreBackFaces);
+				if (Hit >= 0.0f)
+				{
+					Occlusion += bAODistanceFalloff ? 1.0f - Hit / MaxDistance : 1.0f;
+				}
+			}
+			const float Visibility = FMath::Clamp(1.0f - Occlusion / NumRays, 0.0f, 1.0f);
+			return FMath::Pow(Visibility, Strength);
+		};
+
+		// Only covered texels cost anything, so progress is counted over those (empty rows would make the bar jump)
+		TArray<int32> Covered;
+		Covered.Reserve(Owner.Num());
+		for (int32 Index = 0; Index < Owner.Num(); ++Index)
+		{
+			if (Owner[Index] != INDEX_NONE)
+			{
+				Covered.Add(Index);
+			}
+		}
+
+		// Chunks: progress, time estimate and Cancel between them, all cores within each
+		constexpr int32 NumChunks = 200;
+		const int32 ChunkSize = FMath::Max(FMath::DivideAndRoundUp(Covered.Num(), NumChunks), 1);
+		FScopedSlowTask AOTask(static_cast<float>(NumChunks), LOCTEXT("TracingAO", "Tracing ambient occlusion..."));
+		FBakeTimer Timer;
+		for (int32 First = 0; First < Covered.Num(); First += ChunkSize)
+		{
+			if (AOTask.ShouldCancel())
+			{
+				return false;
+			}
+			const int32 Count = FMath::Min(ChunkSize, Covered.Num() - First);
+			AOTask.EnterProgressFrame(static_cast<float>(NumChunks) * Count / Covered.Num(),
+				Timer.Describe(LOCTEXT("TracingAOStep", "Tracing ambient occlusion"), static_cast<float>(First) / Covered.Num()));
+			ParallelFor(Count, [&](int32 Local)
+			{
+				const int32 Index = Covered[First + Local];
+				OutValues[Index] = TraceTexel(Index);
+			});
+		}
+
+		// 3. Smooth the per-texel noise, only across touching triangles
+		TArray<float> Next;
+		for (int32 Pass = 0; Pass < AOBlur; ++Pass)
+		{
+			Next = OutValues;
+			ParallelFor(Size, [&](int32 Y)
+			{
+				for (int32 X = 0; X < Size; ++X)
+				{
+					const int32 Index = Y * Size + X;
+					const int32 Triangle = Owner[Index];
+					if (Triangle == INDEX_NONE)
+					{
+						continue;
+					}
+					float Sum = 0.0f;
+					int32 Count = 0;
+					for (int32 NY = FMath::Max(Y - 1, 0); NY <= FMath::Min(Y + 1, Size - 1); ++NY)
+					{
+						for (int32 NX = FMath::Max(X - 1, 0); NX <= FMath::Min(X + 1, Size - 1); ++NX)
+						{
+							const int32 Neighbor = NY * Size + NX;
+							if (Owner[Neighbor] != INDEX_NONE && TrianglesTouch(Welded, Triangle, Owner[Neighbor]))
+							{
+								Sum += OutValues[Neighbor];
+								++Count;
+							}
+						}
+					}
+					Next[Index] = Sum / Count; // Count >= 1: the texel itself
+				}
+			});
+			Swap(OutValues, Next);
+		}
+		return true;
+	}
+
+	/**
+	 * The whole bake: validate inputs, then 1. analyze the mesh, 2. rasterize, 3. trace AO, 4. pad, 5. write textures, 6. report.
 	 * Unchecked maps cost nothing: their arrays stay empty and are skipped.
 	 */
 	bool FJob::Bake(FMeshMapBakeResult& OutResult)
@@ -451,13 +859,17 @@ namespace BakeMapsImpl
 			return false;
 		}
 
-		const bool bMap[NumMaps] = { bBakeCavity, bBakeEdge, bBakeCurvature };
-		// Neutral value per map where nothing is baked: no cavity (white), no edge (black), flat (gray)
-		const float Background[NumMaps] = { 1.0f, 0.0f, 0.5f };
-		const TCHAR* Suffix[NumMaps] = { TEXT("_Cavity"), TEXT("_Edge"), TEXT("_Curvature") };
+		const bool bMap[NumMaps] = { bBakeCavity, bBakeEdge, bBakeCurvature, bBakeAO };
+		// Neutral value per map where nothing is baked: no cavity (white), no edge (black), flat (gray), unoccluded (white)
+		const float Background[NumMaps] = { 1.0f, 0.0f, 0.5f, 1.0f };
+		const TCHAR* Suffix[NumMaps] = { TEXT("_Cavity"), TEXT("_Edge"), TEXT("_Curvature"), TEXT("_AO") };
 
-		FScopedSlowTask SlowTask(5.0f, LOCTEXT("BakingMaps", "Baking mesh maps..."));
-		SlowTask.MakeDialog();
+		// Progress dialog with a Cancel button. AO is the slow part, so it gets most of the bar
+		constexpr float AOWork = 6.0f;
+		const FBakeTimer TotalTimer;
+		FScopedSlowTask SlowTask(5.0f + (bBakeAO ? AOWork : 0.0f), LOCTEXT("BakingMaps", "Baking mesh maps..."));
+		SlowTask.MakeDialog(true);
+		const FText CancelledMessage = LOCTEXT("Cancelled", "Bake cancelled. No textures were changed.");
 
 		// 1. Mesh analysis
 		SlowTask.EnterProgressFrame(1.0f, LOCTEXT("Analyzing", "Analyzing mesh..."));
@@ -479,6 +891,11 @@ namespace BakeMapsImpl
 		{
 			FindSharpEdges(Welded, EdgeMinAngle, EdgeFullAngle, bEdgeConcave, SharpEdges, SharpEdgesOfVertex);
 		}
+		FTriangleBVH BVH;
+		if (bBakeAO)
+		{
+			BVH.Build(Welded);
+		}
 
 		// 2. Rasterize every triangle in UV space
 		SlowTask.EnterProgressFrame(2.0f, LOCTEXT("Rasterizing", "Rasterizing..."));
@@ -499,9 +916,32 @@ namespace BakeMapsImpl
 		int32 NumOutOfRange = 0;
 		const float SafeEdgeWidth = FMath::Max(EdgeWidth, 0.0001f);
 		TArray<int32> CandidateEdges;
-
-		for (int32 Triangle = 0; Triangle < Welded.Triangles.Num(); ++Triangle)
+		// AO is traced after rasterizing, from the owning triangle and these barycentric weights (W0, W1)
+		TArray<FVector2f> Barycentrics;
+		if (bBakeAO)
 		{
+			Barycentrics.SetNumUninitialized(NumTexels);
+		}
+
+		// Progress (and Cancel) every 1% of the triangles
+		const int32 NumTriangles = Welded.Triangles.Num();
+		constexpr int32 RasterSteps = 100;
+		const int32 TrianglesPerStep = FMath::Max(FMath::DivideAndRoundUp(NumTriangles, RasterSteps), 1);
+		FScopedSlowTask RasterTask(static_cast<float>(FMath::DivideAndRoundUp(NumTriangles, TrianglesPerStep)), LOCTEXT("Rasterizing", "Rasterizing..."));
+		const FBakeTimer RasterTimer;
+
+		for (int32 Triangle = 0; Triangle < NumTriangles; ++Triangle)
+		{
+			if (Triangle % TrianglesPerStep == 0)
+			{
+				if (RasterTask.ShouldCancel())
+				{
+					OutResult.Message = CancelledMessage;
+					return false;
+				}
+				RasterTask.EnterProgressFrame(1.0f, RasterTimer.Describe(LOCTEXT("RasterizingStep", "Rasterizing"), static_cast<float>(Triangle) / NumTriangles));
+			}
+
 			const FIntVector& Tri = Welded.Triangles[Triangle];
 			const int32 C[3] = { Tri.X, Tri.Y, Tri.Z };
 
@@ -570,6 +1010,10 @@ namespace BakeMapsImpl
 						NumConflicts += bConnected ? 0 : 1;
 					}
 					Owner[Index] = Triangle;
+					if (bBakeAO)
+					{
+						Barycentrics[Index] = FVector2f(W0, W1);
+					}
 
 					// Vertex maps: blend the three corner values
 					for (const int32 Map : { Cavity, Curvature })
@@ -598,7 +1042,23 @@ namespace BakeMapsImpl
 			}
 		}
 
-		// 3. Pad the islands so filtering and mips at their edges stay on valid data
+		// 3. Ambient occlusion per covered texel
+		if (bBakeAO)
+		{
+			SlowTask.EnterProgressFrame(AOWork, LOCTEXT("TracingAO", "Tracing ambient occlusion..."));
+			if (!TraceAmbientOcclusion(Welded, BVH, Owner, Barycentrics, Size, Texels[AmbientOcclusion]))
+			{
+				OutResult.Message = CancelledMessage;
+				return false;
+			}
+		}
+		if (SlowTask.ShouldCancel())
+		{
+			OutResult.Message = CancelledMessage;
+			return false;
+		}
+
+		// 4. Pad the islands so filtering and mips at their edges stay on valid data
 		SlowTask.EnterProgressFrame(1.0f, LOCTEXT("Padding", "Padding islands..."));
 		TBitArray<> Filled(false, NumTexels);
 		for (int32 Index = 0; Index < NumTexels; ++Index)
@@ -620,7 +1080,7 @@ namespace BakeMapsImpl
 						continue;
 					}
 
-					float Sum[NumMaps] = { 0.0f, 0.0f, 0.0f };
+					float Sum[NumMaps] = {};
 					int32 Count = 0;
 					for (int32 DY = -1; DY <= 1; ++DY)
 					{
@@ -661,15 +1121,15 @@ namespace BakeMapsImpl
 			}
 		}
 
-		// 4. Write the textures
+		// 5. Write the textures
 		SlowTask.EnterProgressFrame(1.0f, LOCTEXT("CreatingTextures", "Creating textures..."));
 		TArray<FString> Names;
 		TArray<uint8> Pixels;
 
-		auto Write = [&](const FString& TextureSuffix, bool bPacked) -> bool
+		auto Write = [&](const FString& TextureSuffix, bool bPacked, bool bWithAlpha) -> bool
 		{
 			FText Error;
-			UTexture2D* Texture = WriteTexture(TextureSuffix, Size, Pixels, bPacked, Error);
+			UTexture2D* Texture = WriteTexture(TextureSuffix, Size, Pixels, bPacked, bWithAlpha, Error);
 			if (!Texture)
 			{
 				OutResult.Message = Error;
@@ -685,16 +1145,17 @@ namespace BakeMapsImpl
 
 		if (!bSplitTextures)
 		{
-			// One mask: R Curvature, G Cavity, B Edge (BGRA byte order)
+			// One mask: R Curvature, G Cavity, B Edge (BGRA byte order). With AO: A Ambient Occlusion and the name _CCEA;
+			// without it the alpha is dropped (_CCE, compressed as RGB-only) to keep memory down
 			Pixels.SetNumUninitialized(NumTexels * 4);
 			for (int32 Index = 0; Index < NumTexels; ++Index)
 			{
 				Pixels[Index * 4 + 0] = ToByte(TexelValue(Edge, Index));
 				Pixels[Index * 4 + 1] = ToByte(TexelValue(Cavity, Index));
 				Pixels[Index * 4 + 2] = ToByte(TexelValue(Curvature, Index));
-				Pixels[Index * 4 + 3] = 255;
+				Pixels[Index * 4 + 3] = bBakeAO ? ToByte(Texels[AmbientOcclusion][Index]) : 255;
 			}
-			if (!Write(TEXT("_CCE"), true))
+			if (!Write(MeshMapBaker::PackedSuffix(bBakeAO), true, bBakeAO))
 			{
 				return false;
 			}
@@ -712,16 +1173,16 @@ namespace BakeMapsImpl
 				{
 					Pixels[Index] = ToByte(Texels[Map][Index]);
 				}
-				if (!Write(Suffix[Map], false))
+				if (!Write(Suffix[Map], false, false))
 				{
 					return false;
 				}
 			}
 		}
 
-		// 5. Summary, plus notes for anything that went wrong
-		FText Message = FText::Format(LOCTEXT("MapsBaked", "Baked {0} ({1}x{1}, UV {2}). Save the textures to keep them."),
-			FText::FromString(FString::Join(Names, TEXT(", "))), Size, UVChannel);
+		// 6. Summary, plus notes for anything that went wrong
+		FText Message = FText::Format(LOCTEXT("MapsBaked", "Baked {0} ({1}x{1}, UV {2}) in {3}. Save the textures to keep them."),
+			FText::FromString(FString::Join(Names, TEXT(", "))), Size, UVChannel, FormatDuration(TotalTimer.Elapsed()));
 		if (bBakeEdge && SharpEdges.IsEmpty())
 		{
 			Message = FText::Format(LOCTEXT("NoEdges", "{0} No creases reached the start angle, so the edge map is black."), Message);
@@ -742,6 +1203,12 @@ namespace BakeMapsImpl
 
 namespace MeshMapBaker
 {
+	/** _CCEA when the packed mask carries AO in alpha, _CCE (RGB only) when it doesn't. */
+	FString PackedSuffix(bool bWithAO)
+	{
+		return bWithAO ? TEXT("_CCEA") : TEXT("_CCE");
+	}
+
 	/** SM_Rock -> T_Rock (the bake adds _CCE, _Cavity, ...). */
 	FString SuggestBaseName(const UObject* Mesh)
 	{

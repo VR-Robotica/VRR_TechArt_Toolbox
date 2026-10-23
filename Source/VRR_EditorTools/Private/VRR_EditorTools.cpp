@@ -2,7 +2,7 @@
  * VRR_EditorTools module: registers the Toolbox window and the menu/toolbar entries that open it.
  *
  * The window is a dockable tab: a header image on top, a page toolbar on the left, and a widget switcher
- * holding one page per tool (Validate, Texture Packer, Bake Normals, Mesh Maps, Control Rig).
+ * holding one page per tool (Validate, Texture Packer, Bake Normals, UV Layouts, Mesh Maps, Control Rig).
  * Each page lives in its own Menu_<Page> widget (UI) backed by Core_<Page> (the actual work), so this file
  * only wires things together.
  */
@@ -11,8 +11,10 @@
 #include "VRR_EditorToolsStyle.h"
 #include "VRR_EditorToolsCommands.h"
 #include "Menu_TexturePacker.h"
-#include "Menu_TextureValidator.h"
+#include "Menu_AssetValidation.h"
 #include "Menu_BakeNormals.h"
+#include "Menu_UVLayout.h"
+#include "Menu_RebakeTexture.h"
 #include "Menu_BakeMaps.h"
 #include "Menu_ControlRig.h"
 
@@ -180,14 +182,18 @@ const TArray<FVRR_EditorTools::FPageInfo>& FVRR_EditorTools::GetPages()
 {
 	static const TArray<FPageInfo> Pages =
 	{
-		{ EToolPage::TextureValidator, LOCTEXT("ValidateTab", "Validate"), LOCTEXT("ValidateTitle", "Texture Validator"),
-			LOCTEXT("ValidateDesc", "Check texture assets against the project's naming, compression and size rules."), "VrrTools.Page.Validate" },
+		{ EToolPage::AssetValidation, LOCTEXT("ValidateTab", "Validate"), LOCTEXT("ValidateTitle", "Asset Validation"),
+			LOCTEXT("ValidateDesc", "Check textures and meshes against the project's naming conventions and asset rules."), "VrrTools.Page.Validate" },
 		{ EToolPage::TexturePacker, LOCTEXT("PackerTab", "Packer"), LOCTEXT("PackerTitle", "Texture Packer"),
 			LOCTEXT("PackerDesc", "Combine channels from several textures into one packed mask."), "VrrTools.Page.Packer" },
 		{ EToolPage::BakeNormals, LOCTEXT("NormalsTab", "Normals"), LOCTEXT("NormalsTitle", "Bake Smooth Normals"),
 			LOCTEXT("NormalsDesc", "Bake fully smooth normals into vertex colors or a texture, for inverted-hull toon outlines."), "VrrTools.Page.Normals" },
+		{ EToolPage::UVLayout, LOCTEXT("UVLayoutTab", "UV Layouts"), LOCTEXT("UVLayoutTitle", "UV Layouts"),
+			LOCTEXT("UVLayoutDesc", "Build a unique UV channel (usually UV1) from a mesh's islands, with even texel density and one region per material."), "VrrTools.Page.UVLayout" },
+		{ EToolPage::RebakeTexture, LOCTEXT("RebakeTab", "Rebake"), LOCTEXT("RebakeTitle", "Rebake Texture Map to UV Set"),
+			LOCTEXT("RebakeDesc", "Move a texture from one UV channel of a mesh to another: sampled through the source UVs, written through the target UVs."), "VrrTools.Page.Rebake" },
 		{ EToolPage::BakeMaps, LOCTEXT("MapsTab", "Mesh Maps"), LOCTEXT("MapsTitle", "Bake Mesh Maps"),
-			LOCTEXT("MapsDesc", "Bake Cavity, Edge and Curvature masks from a mesh's own geometry."), "VrrTools.Page.MeshMaps" },
+			LOCTEXT("MapsDesc", "Bake Cavity, Edge, Curvature and AO masks from a mesh's own geometry."), "VrrTools.Page.MeshMaps" },
 		{ EToolPage::ControlRig, LOCTEXT("RigTab", "Rig"), LOCTEXT("RigTitle", "Control Rig Generator"),
 			LOCTEXT("RigDesc", "Generate a Modular Control Rig for a character's skeletal mesh."), "VrrTools.Page.Rig" },
 	};
@@ -243,8 +249,10 @@ TSharedRef<SDockTab> FVRR_EditorTools::OnSpawnTabWindow(const FSpawnTabArgs& Spa
 				SNew(SWidgetSwitcher)
 				.WidgetIndex_Lambda([this]() { return static_cast<int32>(ActivePage); })
 				+ SWidgetSwitcher::Slot()[ PageSlot(SNew(SMenu_TexturePacker)) ]
-				+ SWidgetSwitcher::Slot()[ PageSlot(SNew(SMenu_TextureValidator)) ]
+				+ SWidgetSwitcher::Slot()[ PageSlot(SNew(SMenu_AssetValidation)) ]
 				+ SWidgetSwitcher::Slot()[ PageSlot(SNew(SMenu_BakeNormals)) ]
+				+ SWidgetSwitcher::Slot()[ PageSlot(SNew(SMenu_UVLayout)) ]
+				+ SWidgetSwitcher::Slot()[ PageSlot(SNew(SMenu_RebakeTexture)) ]
 				+ SWidgetSwitcher::Slot()[ PageSlot(SNew(SMenu_BakeMaps)) ]
 				+ SWidgetSwitcher::Slot()[ PageSlot(SNew(SMenu_ControlRig)) ]
 			]

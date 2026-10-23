@@ -27,16 +27,26 @@ struct FMeshMapBakeSettings
 	float CurvatureRadius = 2.0f;	// radius (cm) whose curvature reaches full white/black
 	int32 CurvatureBlur = 2;
 
+	// Ambient Occlusion: dark where nearby geometry blocks the sky (rays cast over the hemisphere above each texel)
+	bool bBakeAO = true;
+	int32 AORays = 64;				// rays per texel: more is smoother but slower
+	float AODistance = 10.0f;		// cm; geometry farther than this doesn't occlude
+	float AOBias = 0.02f;			// cm the rays start above the surface, so a face doesn't hit itself
+	float AOStrength = 1.0f;		// contrast exponent: >1 darker, <1 lighter
+	bool bAODistanceFalloff = true;	// near hits occlude fully, hits near AODistance barely
+	bool bAOIgnoreBackFaces = true;	// rays hitting the inside of a surface don't count (open or overlapping shells)
+	int32 AOBlur = 1;				// texel-space smoothing passes, stays within connected surface
+
 	// Output
 	int32 UVChannel = 0;
 	int32 Resolution = 2048;
 	int32 Padding = 8;
-	bool bSplitTextures = false;	// default: one packed RGB mask (R Curvature, G Cavity, B Edge)
+	bool bSplitTextures = false;	// default: one packed mask, _CCE (RGB) or with AO _CCEA (RGBA, A = AO)
 	bool bOverwrite = true;
 	FString OutputFolder;
 	FString OutputBaseName;
 
-	bool HasAnyMap() const { return bBakeCavity || bBakeEdge || bBakeCurvature; }
+	bool HasAnyMap() const { return bBakeCavity || bBakeEdge || bBakeCurvature || bBakeAO; }
 };
 
 struct FMeshMapBakeResult
@@ -49,12 +59,16 @@ struct FMeshMapBakeResult
 };
 
 /**
- * Bakes linear grayscale mesh maps (Cavity, Edge, Curvature) from a Static or Skeletal Mesh into textures,
+ * Bakes linear grayscale mesh maps (Cavity, Edge, Curvature, Ambient Occlusion) from a Static or Skeletal Mesh into textures,
  * through one of its UV channels. Each map is computed from the mesh's own geometry (LOD 0).
- * By default the three go into one packed mask, <Base>_CCE: R Curvature, G Cavity, B Edge.
+ * By default they go into one packed mask: <Base>_CCE (RGB: R Curvature, G Cavity, B Edge), or with AO checked
+ * <Base>_CCEA (the same plus A Ambient Occlusion).
  */
 namespace MeshMapBaker
 {
+	/** _CCEA when the packed mask carries AO in alpha, _CCE (RGB only) when it doesn't. */
+	FString PackedSuffix(bool bWithAO);
+
 	/** T_<mesh name without SM_/SK_> */
 	FString SuggestBaseName(const UObject* Mesh);
 

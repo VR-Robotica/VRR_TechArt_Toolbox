@@ -84,7 +84,7 @@ TSharedRef<SWidget> SMenu_BakeMaps::CreateMeshSection()
 	}));
 }
 
-/** One card per map (Cavity, Edge, Curvature): the header checkbox turns it on, the rows tune it. */
+/** One card per map (Cavity, Edge, Curvature, Ambient Occlusion): the header checkbox turns it on, the rows tune it. */
 TSharedRef<SWidget> SMenu_BakeMaps::CreateMapsSection()
 {
 	auto MapCard = [](const FText& Title, bool* bEnabled, const FText& ToolTip, const TArray<TSharedRef<SWidget>>& Rows) -> TSharedRef<SWidget>
@@ -132,6 +132,32 @@ TSharedRef<SWidget> SMenu_BakeMaps::CreateMapsSection()
 			VrrMenu::Row(LOCTEXT("CurvatureBlur", "Blur"),
 				VrrMenu::IntField(&Settings.CurvatureBlur, 0, 50),
 				LOCTEXT("CurvatureBlurTip", "Neighbor averaging passes. Softens noise on dense meshes")),
+		}),
+
+		MapCard(LOCTEXT("AO", "Ambient Occlusion"), &Settings.bBakeAO,
+			LOCTEXT("AOTip", "White where the surface sees open sky, darker where nearby parts of the mesh block it. Ray traced, so it is the slowest map"), {
+			VrrMenu::HelpText(LOCTEXT("AOInfo", "White where the surface is open, darker where nearby geometry blocks it. Ray traced per texel: the slowest map, and the bake can be cancelled.")),
+			VrrMenu::Row(LOCTEXT("AORays", "Rays per texel"),
+				VrrMenu::IntField(&Settings.AORays, 4, 1024),
+				LOCTEXT("AORaysTip", "More rays give smoother shading but bake time grows with it. 32-64 for previews, 128-256 for final")),
+			VrrMenu::Row(LOCTEXT("AODistance", "Max distance (cm)"),
+				VrrMenu::FloatField(&Settings.AODistance, 0.01f, 1000.0f, 0.1f),
+				LOCTEXT("AODistanceTip", "Geometry farther than this doesn't occlude. Small values give tight contact shadows; large values darken whole recessed areas")),
+			VrrMenu::Row(LOCTEXT("AOStrength", "Strength"),
+				VrrMenu::FloatField(&Settings.AOStrength, 0.0f, 8.0f, 0.05f),
+				LOCTEXT("AOStrengthTip", "Contrast curve applied to the result. 1 is unchanged, above 1 darkens the occlusion, below 1 lightens it")),
+			VrrMenu::Row(LOCTEXT("AOBias", "Bias (cm)"),
+				VrrMenu::FloatField(&Settings.AOBias, 0.0f, 5.0f, 0.001f),
+				LOCTEXT("AOBiasTip", "How far above the surface rays start. Raise it if flat areas show speckles or dark acne; too high misses tight contact shadows")),
+			VrrMenu::Row(LOCTEXT("AOBlur", "Blur"),
+				VrrMenu::IntField(&Settings.AOBlur, 0, 16),
+				LOCTEXT("AOBlurTip", "3x3 smoothing passes on the baked texels. Hides ray noise; stays within connected surface so UV islands don't bleed")),
+			VrrMenu::Row(LOCTEXT("AOFalloff", "Falloff"),
+				VrrMenu::CheckBox(&Settings.bAODistanceFalloff, LOCTEXT("AODistanceFalloff", "Fade with distance"),
+					LOCTEXT("AODistanceFalloffTip", "Close hits occlude fully and hits near the max distance barely, for a softer gradient. Off: any hit within the distance counts fully"))),
+			VrrMenu::Row(LOCTEXT("AOBackFaces", "Back faces"),
+				VrrMenu::CheckBox(&Settings.bAOIgnoreBackFaces, LOCTEXT("AOIgnoreBackFaces", "Ignore back faces"),
+					LOCTEXT("AOIgnoreBackFacesTip", "Rays that hit the inside of a surface don't count. Keeps open meshes and overlapping shells (cloth over a body) from going black"))),
 		}),
 	});
 }
@@ -182,16 +208,21 @@ TSharedRef<SWidget> SMenu_BakeMaps::CreateOutputSection()
 			VrrMenu::FolderPicker(&Settings.OutputFolder, TEXT("/Game"), [this](const FText& Error) { SetStatus(Error, true); })),
 		VrrMenu::Row(LOCTEXT("BaseName", "Base name"),
 			VrrMenu::NameField(&Settings.OutputBaseName),
-			LOCTEXT("BaseNameTip", "The packed mask is named <Base name>_CCE; split textures are <Base name>_Curvature, _Cavity and _Edge")),
+			LOCTEXT("BaseNameTip", "The packed mask is named <Base name>_CCE, or <Base name>_CCEA when it includes Ambient Occlusion; split textures are <Base name>_Curvature, _Cavity, _Edge and _AO")),
 		VrrMenu::Row(LOCTEXT("Textures", "Textures"),
 			VrrMenu::CheckBox(&Settings.bSplitTextures, LOCTEXT("SplitTextures", "Split into separate textures"),
-				LOCTEXT("SplitTexturesTip", "Off: one packed RGB mask (_CCE) with R = Curvature, G = Cavity, B = Edge; unchecked maps get their neutral value (0.5, white, black).\n"
-					"On: one linear grayscale texture per checked map (_Curvature, _Cavity, _Edge)"))),
+				LOCTEXT("SplitTexturesTip", "Off: one packed mask with R = Curvature, G = Cavity, B = Edge. Without Ambient Occlusion it is RGB only (_CCE, smaller in memory); "
+					"with it, A = Ambient Occlusion and the name is _CCEA. Unchecked maps get their neutral value (0.5, white, black).\n"
+					"On: one linear grayscale texture per checked map (_Curvature, _Cavity, _Edge, _AO)"))),
 		VrrMenu::Note(TAttribute<FText>::CreateLambda([this]()
 		{
 			return Settings.bSplitTextures
-				? FText::Format(LOCTEXT("SplitNames", "Creates {0}_Curvature, {0}_Cavity and {0}_Edge (G8, linear)"), FText::FromString(Settings.OutputBaseName))
-				: FText::Format(LOCTEXT("PackedNames", "Creates {0}_CCE (Masks compression, linear): R Curvature, G Cavity, B Edge"), FText::FromString(Settings.OutputBaseName));
+				? FText::Format(LOCTEXT("SplitNames", "Creates {0}_Curvature, {0}_Cavity, {0}_Edge and {0}_AO (G8, linear)"), FText::FromString(Settings.OutputBaseName))
+				: Settings.bBakeAO
+					? FText::Format(LOCTEXT("PackedNamesAO", "Creates {0}{1} (RGBA, Masks compression, linear): R Curvature, G Cavity, B Edge, A Ambient Occlusion"),
+						FText::FromString(Settings.OutputBaseName), FText::FromString(MeshMapBaker::PackedSuffix(true)))
+					: FText::Format(LOCTEXT("PackedNames", "Creates {0}{1} (RGB, Masks compression, linear): R Curvature, G Cavity, B Edge"),
+						FText::FromString(Settings.OutputBaseName), FText::FromString(MeshMapBaker::PackedSuffix(false)));
 		})),
 		VrrMenu::Row(LOCTEXT("Existing", "Existing textures"),
 			VrrMenu::CheckBox(&Settings.bOverwrite, LOCTEXT("Overwrite", "Overwrite"),

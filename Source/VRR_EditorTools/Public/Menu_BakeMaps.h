@@ -10,7 +10,7 @@
 template <typename OptionType> class SComboBox;
 
 /**
- * Toolbox "Mesh Maps" page: bakes Cavity, Edge and Curvature maps from a mesh into textures.
+ * Toolbox "Mesh Maps" page: bakes Cavity, Edge, Curvature and Ambient Occlusion maps from a mesh into textures.
  * The baking itself is in MeshMapBaker (Core_BakeMaps.h).
  */
 class SMenu_BakeMaps : public SCompoundWidget

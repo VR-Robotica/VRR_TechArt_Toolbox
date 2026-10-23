@@ -51,11 +51,13 @@ public class VRR_EditorTools : ModuleRules
 				"CoreUObject",
 				"DesktopPlatform",
 				"EditorFramework",
+				"EditorWidgets",
 				"Engine",
 				"ImageCore",
 				"InputCore",
 				"Json",
 				"MeshDescription",
+				"PhysicsCore",
 				"Projects",
 				"PropertyEditor",
 				"RenderCore",
@@ -66,6 +68,7 @@ public class VRR_EditorTools : ModuleRules
 				"SlateCore",
 				"StaticMeshDescription",
 				"ToolMenus",
+				"ToolWidgets",
 				"UnrealEd",
 				// ... add private dependencies that you statically link with here ...	
 			}

@@ -8,15 +8,25 @@
  *    SuffixRules maps each known suffix to a kind (color, normal, mask, single channel).
  *  - Each check compares the texture's real settings with what its kind needs: sRGB only for color data,
  *    a compression that fits the data, a sensible size, and mips/streaming for anything that isn't UI.
- *  - Problems are collected as FTextureIssue rows (error or warning) for the Validate page to list.
+ *  - Curve atlases (CA_) are linear lookup tables and get their own rules: sRGB off, uncompressed, no mips,
+ *    any height (one row per curve).
+ *  - Virtual textures (Virtual Texture Streaming on) start with VT_ instead of T_. They need what the engine needs to
+ *    build them as VT: virtual texturing on for the project, power-of-two size (or padding), mips, and not the
+ *    ColorLookupTable group. They skip the max size and Never Stream checks (VT streams tiles, and big is the point),
+ *    and get a warning when they're too small to gain anything.
+ *  - Problems are collected as FAssetIssue rows (error or warning) for the Asset Validation page to list.
  *    Errors are things that render wrong (sRGB on a normal map); warnings are style or cost issues.
+ *  - Fix All: a missing T_ / VT_ / CA_ prefix is added by renaming, and a missing or unknown suffix gets the one
+ *    its old suffix or settings point to (_Diff -> _D, normal map compression -> _N). An unknown prefix or suffix is
+ *    kept or replaced, as the person fixing chooses (Tex_Rock_Diff -> T_Tex_Rock_Diff_D or T_Rock_D); sRGB, compression, max size, mips, streaming,
+ *    texture group, virtual texture streaming and power-of-two padding are set to what the check expects.
+ *    An unknown suffix, a non-power-of-two regular texture or a project without VT needs a person.
  */
 
 #include "Core_TextureValidator.h"
 
-#include "AssetRegistry/AssetRegistryModule.h"
+#include "Curves/CurveLinearColorAtlas.h"
 #include "Engine/Texture2D.h"
-#include "Misc/ScopedSlowTask.h"
 
 #define LOCTEXT_NAMESPACE "TextureValidator"
 
@@ -66,10 +76,17 @@ namespace TextureValidator
 		return nullptr;
 	}
 
-	/** "T_Rock_N_01" -> "N" (strips the T_ prefix and a trailing number). Empty when there is no suffix. */
+	/** Prefixes of regular and virtual textures. */
+	const TCHAR* const TexturePrefix = TEXT("T_");
+	const TCHAR* const VirtualPrefix = TEXT("VT_");
+
+	/** "T_Rock_N_01" or "VT_Rock_N_01" -> "N" (strips the prefix and a trailing number). Empty when there is no suffix. */
 	FString GetNameSuffix(FString Name)
 	{
-		Name.RemoveFromStart(TEXT("T_"));
+		if (!Name.RemoveFromStart(VirtualPrefix))
+		{
+			Name.RemoveFromStart(TexturePrefix);
+		}
 
 		int32 Underscore;
 		if (Name.FindLastChar(TEXT('_'), Underscore) && Name.Mid(Underscore + 1).IsNumeric())
@@ -78,6 +95,122 @@ namespace TextureValidator
 		}
 
 		return Name.FindLastChar(TEXT('_'), Underscore) ? Name.Mid(Underscore + 1) : FString();
+	}
+
+	/** Common suffixes from other tools and habits, and the known suffix each one means. */
+	const TPair<const TCHAR*, const TCHAR*> SuffixAliases[] =
+	{
+		{ TEXT("Diff"), TEXT("D") }, { TEXT("Dif"), TEXT("D") }, { TEXT("Col"), TEXT("D") }, { TEXT("Color"), TEXT("D") },
+		{ TEXT("Colour"), TEXT("D") }, { TEXT("BaseColor"), TEXT("D") }, { TEXT("Alb"), TEXT("D") },
+		{ TEXT("Nrm"), TEXT("N") }, { TEXT("Norm"), TEXT("N") }, { TEXT("Nor"), TEXT("N") }, { TEXT("NormalMap"), TEXT("N") }, { TEXT("NM"), TEXT("N") },
+		{ TEXT("Rgh"), TEXT("R") }, { TEXT("Roughness"), TEXT("R") },
+		{ TEXT("Met"), TEXT("M") }, { TEXT("Metallic"), TEXT("M") }, { TEXT("Metalness"), TEXT("M") },
+		{ TEXT("Occ"), TEXT("AO") }, { TEXT("Occlusion"), TEXT("AO") }, { TEXT("AmbientOcclusion"), TEXT("AO") },
+		{ TEXT("Disp"), TEXT("H") }, { TEXT("Displacement"), TEXT("H") }, { TEXT("Bump"), TEXT("H") },
+		{ TEXT("Emit"), TEXT("E") }, { TEXT("Emission"), TEXT("E") }, { TEXT("Glow"), TEXT("E") },
+		{ TEXT("Alpha"), TEXT("O") }, { TEXT("Opac"), TEXT("O") },
+		{ TEXT("Masks"), TEXT("Mask") },
+	};
+
+	/**
+	 * The known suffix a texture should get: what its unknown suffix is an alias of, else what its settings say
+	 * (normal map compression -> N, sRGB color -> D). Empty when there's no safe guess (masks, single channels).
+	 */
+	FString GuessSuffix(const FString& UnknownSuffix, const UTexture2D* Texture)
+	{
+		for (const TPair<const TCHAR*, const TCHAR*>& Alias : SuffixAliases)
+		{
+			if (UnknownSuffix.Equals(Alias.Key, ESearchCase::IgnoreCase))
+			{
+				return Alias.Value;
+			}
+		}
+		if (Texture->CompressionSettings == TC_Normalmap)
+		{
+			return TEXT("N");
+		}
+		if (Texture->SRGB && (Texture->CompressionSettings == TC_Default || Texture->CompressionSettings == TC_BC7))
+		{
+			return TEXT("D");
+		}
+		return FString();
+	}
+
+	/**
+	 * Candidate names for a texture, [replace unknown prefix][replace unknown suffix] (empty = doesn't apply):
+	 *  1. take off a known prefix (T_ or VT_) and a trailing number, split the rest at _,
+	 *  2. an unknown prefix is the first part, when nothing known came off and there's more after it,
+	 *  3. an unknown suffix is the last part (when there are two or more); NewSuffix is added after it or put in its place,
+	 *  4. Prefix + the parts (cleaned) + the number.
+	 * Tex_Rock_Diff_01 with NewSuffix D -> T_Tex_Rock_Diff_D_01, T_Rock_Diff_D_01, T_Tex_Rock_D_01, T_Rock_D_01.
+	 */
+	void MakeTextureNames(const FString& Name, const FString& Prefix, const FString& NewSuffix, FString (&OutNames)[2][2])
+	{
+		// 1. Known prefix, number, parts
+		FString Rest = Name;
+		const bool bKnownPrefix = Rest.RemoveFromStart(VirtualPrefix, ESearchCase::CaseSensitive) || Rest.RemoveFromStart(TexturePrefix);
+		FString Number;
+		int32 Underscore;
+		if (Rest.FindLastChar(TEXT('_'), Underscore) && Rest.Mid(Underscore + 1).IsNumeric())
+		{
+			Number = Rest.Mid(Underscore);
+			Rest.LeftInline(Underscore);
+		}
+		TArray<FString> Parts;
+		Rest.ParseIntoArray(Parts, TEXT("_"), true);
+		// Rock_N: the first part is the name, not a prefix (taking it off would leave just the suffix)
+		const int32 MinPartsForPrefix = Parts.Num() >= 2 && FindSuffixRule(Parts.Last()) ? 3 : 2;
+
+		for (int32 bReplacePrefix = 0; bReplacePrefix < 2; ++bReplacePrefix)
+		{
+			for (int32 bReplaceSuffix = 0; bReplaceSuffix < 2; ++bReplaceSuffix)
+			{
+				FString& Out = OutNames[bReplacePrefix][bReplaceSuffix];
+				Out.Reset();
+				TArray<FString> Result = Parts;
+
+				// 2. Unknown prefix
+				if (bReplacePrefix)
+				{
+					if (bKnownPrefix || Result.Num() < MinPartsForPrefix)
+					{
+						continue;
+					}
+					Result.RemoveAt(0);
+				}
+
+				// 3. Suffix (the last of two or more parts)
+				const bool bKnownSuffix = Result.Num() >= 2 && FindSuffixRule(Result.Last());
+				if (bKnownSuffix || NewSuffix.IsEmpty())
+				{
+					if (bReplaceSuffix)
+					{
+						continue;	// nothing to replace with, or nothing to replace
+					}
+				}
+				else if (bReplaceSuffix)
+				{
+					if (Result.Num() < 2)
+					{
+						continue;	// no suffix to replace: only adding applies
+					}
+					Result.Last() = NewSuffix;
+				}
+				else
+				{
+					Result.Add(NewSuffix);
+				}
+
+				// 4. Something must be left before the suffix
+				const bool bHasSuffix = bKnownSuffix || !NewSuffix.IsEmpty();
+				const FString Body = AssetValidation::CleanNameBody(FString::Join(Result, TEXT("_")));
+				if (Result.Num() < (bHasSuffix ? 2 : 1) || Body.IsEmpty())
+				{
+					continue;
+				}
+				Out = Prefix + Body + Number;
+			}
+		}
 	}
 
 	/** Display name of a compression setting, as the texture editor shows it. */
@@ -104,107 +237,147 @@ namespace TextureValidator
 		return FString::Join(Names, TEXT(", "));
 	}
 
-	/** Asks the Asset Registry for every UTexture2D (and subclasses) under a folder, without loading them. */
-	TArray<FAssetData> FindTextures(const FString& Folder, bool bIncludeSubfolders)
+	/** A Fix All settings change for a texture. */
+	template <typename FEdit>
+	TFunction<void(UObject*)> EditTexture(FEdit Edit)
 	{
-		FARFilter Filter;
-		Filter.ClassPaths.Add(UTexture2D::StaticClass()->GetClassPathName());
-		Filter.bRecursiveClasses = true;
-		Filter.PackagePaths.Add(FName(*Folder));
-		Filter.bRecursivePaths = bIncludeSubfolders;
-
-		TArray<FAssetData> Assets;
-		FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry").Get().GetAssets(Filter, Assets);
-		return Assets;
-	}
-
-	/** Keeps only the textures, e.g. from a mixed Content Browser selection. */
-	TArray<FAssetData> FilterTextures(const TArray<FAssetData>& Assets)
-	{
-		return Assets.FilterByPredicate([](const FAssetData& Asset)
+		return [Edit](UObject* Object)
 		{
-			return Asset.IsInstanceOf(UTexture2D::StaticClass());
-		});
+			if (UTexture2D* Texture = Cast<UTexture2D>(Object))
+			{
+				Edit(*Texture);
+			}
+		};
 	}
+
+	/** Prefix of Curve Atlas textures (Curve Linear Color Atlas assets, or lookup textures baked from them). */
+	const TCHAR* const CurveAtlasPrefix = TEXT("CA_");
 
 	/**
-	 * Validates a list of textures:
-	 *  1. load and check each one (cancelable, since big folders take a while to load),
-	 *  2. count errors and warnings,
-	 *  3. sort so errors come first.
+	 * Curve atlases: each row is a color curve sampled across the width, read as exact linear values.
+	 *  - Naming: CA_ prefix, no type suffix needed (the prefix says what it is).
+	 *  - Settings: sRGB off (error: the curve values would be gamma-decoded), uncompressed HDR or another
+	 *    uncompressed format (block compression bands and bleeds between rows).
+	 *  - Resolution: height is the number of curves, so only the width needs to be a power of two; max size as usual.
+	 *  - Mips: none (lower mips average neighbouring curves together), so "no mips" and Never Stream are expected.
+	 * Unreal's Curve Atlas asset starts with these settings (TC_HDR, RGBA16F, no mips, sRGB off).
 	 */
-	FTextureValidationResult Validate(const TArray<FAssetData>& Assets, const FTextureValidatorSettings& Settings)
+	template <typename FAddIssue>
+	void ValidateCurveAtlas(const FString& Name, bool bIsAtlasAsset, const UTexture2D* Texture, const FTextureValidatorSettings& Settings, FAddIssue& AddIssue)
 	{
-		FTextureValidationResult Result;
+		using ESeverity = FAssetIssue::ESeverity;
 
-		// 1. Check each texture. Loading is the slow part; the user can cancel and keep what was found so far
-		FScopedSlowTask SlowTask(Assets.Num(), LOCTEXT("Validating", "Validating textures..."));
-		SlowTask.MakeDialog(true);
-
-		for (const FAssetData& Asset : Assets)
+		if (Settings.bCheckNaming && bIsAtlasAsset && !Name.StartsWith(CurveAtlasPrefix, ESearchCase::CaseSensitive))
 		{
-			if (SlowTask.ShouldCancel())
-			{
-				break;
-			}
-			SlowTask.EnterProgressFrame(1.0f, FText::FromName(Asset.AssetName));
+			AddIssue(ESeverity::Warning, LOCTEXT("RuleNaming", "Naming"), LOCTEXT("AtlasPrefix", "Curve Atlas should start with CA_")).RenameTo = CurveAtlasPrefix + Name;
+		}
 
-			if (const UTexture2D* Texture = Cast<UTexture2D>(Asset.GetAsset()))
+		if (Settings.bCheckSettings)
+		{
+			const FText Rule = LOCTEXT("RuleSettings", "Settings");
+			if (Texture->SRGB)
 			{
-				ValidateTexture(Asset, Texture, Settings, Result.Issues);
-				++Result.NumScanned;
+				AddIssue(ESeverity::Error, Rule, LOCTEXT("AtlasSRGB", "Curve atlas should have sRGB off (its values are linear)")).FixSettings =
+					EditTexture([](UTexture2D& Fix) { Fix.SRGB = false; });
+			}
+			const TArray<TextureCompressionSettings> Allowed = { TC_HDR, TC_HDR_F32, TC_VectorDisplacementmap };
+			if (!Allowed.Contains(Texture->CompressionSettings))
+			{
+				AddIssue(ESeverity::Warning, Rule, FText::Format(LOCTEXT("AtlasCompression", "Compression is {0}, expected {1}, {2} or {3} (uncompressed) for a curve atlas"),
+					GetCompressionName(Texture->CompressionSettings), GetCompressionName(TC_HDR), GetCompressionName(TC_HDR_F32), GetCompressionName(TC_VectorDisplacementmap)))
+					.FixSettings = EditTexture([](UTexture2D& Fix) { Fix.CompressionSettings = TC_HDR; });
 			}
 		}
 
-		// 2. Totals for the summary line
-		for (const FTextureIssue& Issue : Result.Issues)
+		if (Settings.bCheckResolution && Texture->Source.IsValid())
 		{
-			(Issue.Severity == FTextureIssue::ESeverity::Error ? Result.NumErrors : Result.NumWarnings)++;
+			const FText Rule = LOCTEXT("RuleResolution", "Resolution");
+			const int32 SizeX = static_cast<int32>(Texture->Source.GetSizeX());
+			const int32 SizeY = static_cast<int32>(Texture->Source.GetSizeY());
+			if (!FMath::IsPowerOfTwo(SizeX))
+			{
+				AddIssue(ESeverity::Warning, Rule, FText::Format(LOCTEXT("AtlasWidth", "Width {0} is not a power of two"), SizeX));
+			}
+			if (FMath::Max(SizeX, SizeY) > Settings.MaxSize && !(Texture->MaxTextureSize > 0 && Texture->MaxTextureSize <= Settings.MaxSize))
+			{
+				AddIssue(ESeverity::Error, Rule, FText::Format(LOCTEXT("AtlasTooLarge", "{0} x {1} is larger than the {2} max"),
+					SizeX, SizeY, FText::AsNumber(Settings.MaxSize, &FNumberFormattingOptions::DefaultNoGrouping())))
+					.FixSettings = EditTexture([MaxSize = Settings.MaxSize](UTexture2D& Fix) { Fix.MaxTextureSize = MaxSize; });
+			}
 		}
 
-		// 3. Errors first, then by texture name
-		Result.Issues.StableSort([](const FTextureIssue& A, const FTextureIssue& B)
+		if (Settings.bCheckMips && Texture->MipGenSettings != TMGS_NoMipmaps)
 		{
-			if (A.Severity != B.Severity)
-			{
-				return A.Severity == FTextureIssue::ESeverity::Error;
-			}
-			return A.Asset.AssetName.LexicalLess(B.Asset.AssetName);
-		});
-		return Result;
+			AddIssue(ESeverity::Warning, LOCTEXT("RuleMips", "Mips"), LOCTEXT("AtlasMips", "Curve atlas has mipmaps (lower mips blend neighbouring curves); set Mip Gen Settings to NoMipmaps"))
+				.FixSettings = EditTexture([](UTexture2D& Fix) { Fix.MipGenSettings = TMGS_NoMipmaps; });
+		}
 	}
 
 	/**
-	 * Runs every enabled check on one texture. The suffix is looked up once and shared by the checks:
+	 * Runs every enabled check on one texture. Curve atlases go to ValidateCurveAtlas. The suffix is looked up once and shared by the checks:
 	 * naming, settings (sRGB + compression), resolution, then mips and streaming.
 	 */
-	void ValidateTexture(const FAssetData& Asset, const UTexture2D* Texture, const FTextureValidatorSettings& Settings, TArray<FTextureIssue>& OutIssues)
+	void ValidateTexture(const FAssetData& Asset, const UTexture2D* Texture, const FTextureValidatorSettings& Settings, TArray<FAssetIssue>& OutIssues)
 	{
-		using ESeverity = FTextureIssue::ESeverity;
+		using ESeverity = FAssetIssue::ESeverity;
 
-		auto AddIssue = [&Asset, &OutIssues](ESeverity Severity, const FText& Rule, const FText& Message)
+		// Returns the issue so a fix can be attached
+		auto AddIssue = [&Asset, &OutIssues](ESeverity Severity, const FText& Rule, const FText& Message) -> FAssetIssue&
 		{
-			OutIssues.Add({ Asset, Severity, Rule, Message });
+			return OutIssues.Add_GetRef({ Asset, Severity, FAssetIssue::EAssetType::Texture, Rule, Message });
 		};
 
 		const FString Name = Asset.AssetName.ToString();
+
+		// Curve atlases (CA_, or a Curve Atlas asset) are lookup tables of linear curve values: their own rules
+		const bool bIsAtlasAsset = Texture->IsA<UCurveLinearColorAtlas>();
+		if (bIsAtlasAsset || Name.StartsWith(CurveAtlasPrefix, ESearchCase::CaseSensitive))
+		{
+			ValidateCurveAtlas(Name, bIsAtlasAsset, Texture, Settings, AddIssue);
+			return;
+		}
+
 		// What the name says this texture holds (null rule = unknown suffix)
 		const FString Suffix = GetNameSuffix(Name);
 		const FSuffixRule* SuffixRule = FindSuffixRule(Suffix);
+
+		// Virtual textures: streamed in tiles, named VT_
+		const bool bVirtual = Texture->VirtualTextureStreaming != 0;
+		const bool bVirtualName = Name.StartsWith(VirtualPrefix, ESearchCase::CaseSensitive);
+		const bool bPowerOfTwo = Texture->Source.IsValid()
+			&& FMath::IsPowerOfTwo(Texture->Source.GetSizeX()) && FMath::IsPowerOfTwo(Texture->Source.GetSizeY());
+		const bool bPadded = Texture->PowerOfTwoMode != ETexturePowerOfTwoSetting::None;
+		const bool bVirtualRules = bVirtual && Settings.bCheckVirtual;	// checks the VT rules replace
 
 		// NAMING
 		if (Settings.bCheckNaming)
 		{
 			const FText Rule = LOCTEXT("RuleNaming", "Naming");
-			if (!Name.StartsWith(TEXT("T_")))
+
+			// The names both naming issues fix to (VT_ for virtual textures, or ones already named VT_)
+			const FString Prefix = bVirtual || bVirtualName ? VirtualPrefix : TexturePrefix;
+			const FString NewSuffix = SuffixRule ? FString() : GuessSuffix(Suffix, Texture);
+			FString Names[2][2];
+			MakeTextureNames(Name, Prefix, NewSuffix, Names);
+
+			if (bVirtual && !bVirtualName)
 			{
-				AddIssue(ESeverity::Warning, Rule, LOCTEXT("MissingPrefix", "Name should start with T_"));
+				// T_Rock_D -> VT_Rock_D
+				AssetValidation::SetRenameChoices(AddIssue(ESeverity::Warning, Rule, LOCTEXT("MissingVirtualPrefix", "Virtual texture should start with VT_")), Name, Names);
+			}
+			else if (!bVirtual && !bVirtualName && !Name.StartsWith(TexturePrefix))
+			{
+				AssetValidation::SetRenameChoices(AddIssue(ESeverity::Warning, Rule, LOCTEXT("MissingPrefix", "Name should start with T_")), Name, Names);
 			}
 			if (!SuffixRule)
 			{
-				AddIssue(ESeverity::Warning, Rule, Suffix.IsEmpty()
+				FAssetIssue& Issue = AddIssue(ESeverity::Warning, Rule, Suffix.IsEmpty()
 					? LOCTEXT("MissingSuffix", "Name has no type suffix (e.g. _D, _N, _ORM)")
 					: FText::Format(LOCTEXT("UnknownSuffix", "Unknown suffix _{0}"), FText::FromString(Suffix)));
+				if (!NewSuffix.IsEmpty())
+				{
+					AssetValidation::SetRenameChoices(Issue, Name, Names);
+				}
 			}
 		}
 
@@ -222,7 +395,8 @@ namespace TextureValidator
 			{
 				AddIssue(ESeverity::Error, Rule, bWantsSRGB
 					? LOCTEXT("NeedsSRGB", "Color texture should have sRGB on")
-					: LOCTEXT("NoSRGB", "Data texture (normal/mask) should have sRGB off"));
+					: LOCTEXT("NoSRGB", "Data texture (normal/mask) should have sRGB off"))
+					.FixSettings = EditTexture([bWantsSRGB](UTexture2D& Fix) { Fix.SRGB = bWantsSRGB; });
 			}
 
 			// Compressions that keep this kind of data intact. A wrong one on a normal map breaks shading (error);
@@ -247,7 +421,8 @@ namespace TextureValidator
 
 				AddIssue(SuffixRule->Kind == EKind::Normal ? ESeverity::Error : ESeverity::Warning, Rule,
 					FText::Format(LOCTEXT("WrongCompression", "Compression is {0}, expected {1} for _{2}"),
-						GetCompressionName(Compression), FText::FromString(FString::Join(AllowedNames, TEXT(" or "))), FText::FromString(Suffix)));
+						GetCompressionName(Compression), FText::FromString(FString::Join(AllowedNames, TEXT(" or "))), FText::FromString(Suffix)))
+					.FixSettings = EditTexture([Target = Allowed[0]](UTexture2D& Fix) { Fix.CompressionSettings = Target; });	// the first allowed is the usual one
 			}
 		}
 
@@ -259,8 +434,8 @@ namespace TextureValidator
 			const int32 SizeY = Texture->Source.GetSizeY();
 			const FText SizeText = FText::FromString(FString::Printf(TEXT("%d x %d"), SizeX, SizeY));
 
-			// Non-power-of-two textures get no mips and can't stream
-			if (!FMath::IsPowerOfTwo(SizeX) || !FMath::IsPowerOfTwo(SizeY))
+			// Non-power-of-two textures get no mips and can't stream (virtual ones have their own rule below)
+			if (!bVirtualRules && (!FMath::IsPowerOfTwo(SizeX) || !FMath::IsPowerOfTwo(SizeY)))
 			{
 				AddIssue(ESeverity::Warning, Rule,
 					FText::Format(LOCTEXT("NotPowerOfTwo", "{0} is not a power of two (no mips or streaming)"), SizeText));
@@ -268,10 +443,11 @@ namespace TextureValidator
 
 			// A Maximum Texture Size setting at or under the limit caps it in game, so that's fine
 			const bool bCapped = Texture->MaxTextureSize > 0 && Texture->MaxTextureSize <= Settings.MaxSize;
-			if (FMath::Max(SizeX, SizeY) > Settings.MaxSize && !bCapped)
+			if (FMath::Max(SizeX, SizeY) > Settings.MaxSize && !bCapped && !bVirtual)
 			{
 				AddIssue(ESeverity::Error, Rule,
-					FText::Format(LOCTEXT("TooLarge", "{0} is larger than the {1} max"), SizeText, FText::AsNumber(Settings.MaxSize, &FNumberFormattingOptions::DefaultNoGrouping())));
+					FText::Format(LOCTEXT("TooLarge", "{0} is larger than the {1} max"), SizeText, FText::AsNumber(Settings.MaxSize, &FNumberFormattingOptions::DefaultNoGrouping())))
+					.FixSettings = EditTexture([MaxSize = Settings.MaxSize](UTexture2D& Fix) { Fix.MaxTextureSize = MaxSize; });	// caps it in game; the source stays
 			}
 		}
 
@@ -280,20 +456,78 @@ namespace TextureValidator
 		{
 			const FText Rule = LOCTEXT("RuleMips", "Mips");
 
-			if (Texture->MipGenSettings == TMGS_NoMipmaps)
+			if (Texture->MipGenSettings == TMGS_NoMipmaps && !bVirtualRules)
 			{
-				AddIssue(ESeverity::Warning, Rule, LOCTEXT("NoMips", "Has no mipmaps (shimmers at a distance, can't stream)"));
+				AddIssue(ESeverity::Warning, Rule, LOCTEXT("NoMips", "Has no mipmaps (shimmers at a distance, can't stream)"))
+					.FixSettings = EditTexture([](UTexture2D& Fix) { Fix.MipGenSettings = TMGS_FromTextureGroup; });
 			}
-			if (Texture->NeverStream)
+			if (Texture->NeverStream && !bVirtual)
 			{
-				AddIssue(ESeverity::Warning, Rule, LOCTEXT("NeverStream", "Never Stream is on (always fully in memory)"));
+				AddIssue(ESeverity::Warning, Rule, LOCTEXT("NeverStream", "Never Stream is on (always fully in memory)"))
+					.FixSettings = EditTexture([](UTexture2D& Fix) { Fix.NeverStream = false; });
 			}
 
 			// Normal maps are recognized by suffix or by their compression, whichever says so
 			const bool bIsNormalMap = (SuffixRule && SuffixRule->Kind == EKind::Normal) || Texture->CompressionSettings == TC_Normalmap;
 			if (bIsNormalMap && !IsNormalMapGroup(Texture->LODGroup))
 			{
-				AddIssue(ESeverity::Warning, Rule, LOCTEXT("NormalGroup", "Normal map should use a NormalMap texture group"));
+				AddIssue(ESeverity::Warning, Rule, LOCTEXT("NormalGroup", "Normal map should use a NormalMap texture group"))
+					.FixSettings = EditTexture([](UTexture2D& Fix) { Fix.LODGroup = TEXTUREGROUP_WorldNormalMap; });
+			}
+		}
+
+		// VIRTUAL TEXTURES (the engine turns VT off, or forces settings, when these aren't met)
+		if (Settings.bCheckVirtual && (bVirtual || bVirtualName))
+		{
+			const FText Rule = LOCTEXT("RuleVirtual", "Virtual");
+			const bool bCanBeVirtual = (bPowerOfTwo || bPadded) && Texture->LODGroup != TEXTUREGROUP_ColorLookupTable;
+
+			if (!bVirtual)
+			{
+				// Named VT_ but not virtual. With VT off for the project, the engine turns it off on every texture
+				if (!UTexture::IsVirtualTexturingEnabled())
+				{
+					AddIssue(ESeverity::Error, Rule, LOCTEXT("ProjectVTOff", "Named VT_, but virtual texturing is off for the project (Project Settings > Rendering > Virtual Textures)"));
+				}
+				else
+				{
+					FAssetIssue& Issue = AddIssue(ESeverity::Warning, Rule, bCanBeVirtual
+						? LOCTEXT("VTOff", "Named VT_, but Virtual Texture Streaming is off (materials sampling it then need Virtual sampler types)")
+						: LOCTEXT("VTOffCant", "Named VT_, but Virtual Texture Streaming is off, and it can't be virtual as it is (not a power of two, or ColorLookupTable group)"));
+					if (bCanBeVirtual)
+					{
+						// What UTexture::SetVirtualTextureStreaming does (it isn't exported): the property event tells the materials using it to update
+						Issue.FixSettings = EditTexture([](UTexture2D& Fix)
+						{
+							Fix.VirtualTextureStreaming = true;
+							FPropertyChangedEvent Event(UTexture::StaticClass()->FindPropertyByName(GET_MEMBER_NAME_CHECKED(UTexture, VirtualTextureStreaming)));
+							Fix.PostEditChangeProperty(Event);
+						});
+					}
+				}
+			}
+			else
+			{
+				if (Texture->Source.IsValid() && !bPowerOfTwo && !bPadded)
+				{
+					AddIssue(ESeverity::Error, Rule, FText::Format(LOCTEXT("VTNotPowerOfTwo", "Virtual textures need a power-of-two size ({0} x {1}): pad it, or make it a regular texture"),
+						Texture->Source.GetSizeX(), Texture->Source.GetSizeY()))
+						.FixSettings = EditTexture([](UTexture2D& Fix) { Fix.PowerOfTwoMode = ETexturePowerOfTwoSetting::PadToPowerOfTwo; });
+				}
+				if (Texture->MipGenSettings == TMGS_NoMipmaps)
+				{
+					AddIssue(ESeverity::Error, Rule, LOCTEXT("VTNoMips", "Virtual textures need mipmaps (the engine forces SimpleAverage)"))
+						.FixSettings = EditTexture([](UTexture2D& Fix) { Fix.MipGenSettings = TMGS_FromTextureGroup; });
+				}
+				if (Texture->LODGroup == TEXTUREGROUP_ColorLookupTable)
+				{
+					AddIssue(ESeverity::Error, Rule, LOCTEXT("VTLUT", "The ColorLookupTable group can't be virtual (it has no mips): turn Virtual Texture Streaming off"));
+				}
+				if (Texture->Source.IsValid() && FMath::Max(Texture->Source.GetSizeX(), Texture->Source.GetSizeY()) < Settings.VirtualMinSize)
+				{
+					AddIssue(ESeverity::Warning, Rule, FText::Format(LOCTEXT("VTSmall", "{0} x {1} is small for a virtual texture (under {2}): a regular texture avoids the tile overhead"),
+						Texture->Source.GetSizeX(), Texture->Source.GetSizeY(), FText::AsNumber(Settings.VirtualMinSize, &FNumberFormattingOptions::DefaultNoGrouping())));
+				}
 			}
 		}
 	}
