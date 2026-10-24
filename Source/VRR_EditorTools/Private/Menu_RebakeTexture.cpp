@@ -139,20 +139,6 @@ TSharedRef<SWidget> SMenu_RebakeTexture::CreateChannelCombo(TSharedPtr<SComboBox
 		];
 }
 
-/** Settings on the left (filling the width), the preview on the right. */
-static TSharedRef<SWidget> SettingsAndPreview(const TSharedRef<SWidget>& SettingsColumn, const TSharedRef<SWidget>& PreviewColumn)
-{
-	return SNew(SHorizontalBox)
-		+ SHorizontalBox::Slot().FillWidth(1.0f).VAlign(VAlign_Top).Padding(0.0f, 0.0f, VrrMenu::CardGap, 0.0f)
-		[
-			SettingsColumn
-		]
-		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Top)
-		[
-			PreviewColumn
-		];
-}
-
 /** A dark square showing the texture (aspect kept), or a hint when there is none, with a caption under it. */
 TSharedRef<SWidget> SMenu_RebakeTexture::CreateTexturePreview(const FSlateBrush* Brush, TAttribute<bool> HasTexture, TAttribute<FText> Caption)
 {
@@ -264,7 +250,7 @@ TSharedRef<SWidget> SMenu_RebakeTexture::CreateSourceSection()
 	return VrrMenu::HelpCard(LOCTEXT("SourceHeader", "Source"),
 		LOCTEXT("SourceHelp", "Each texel of the new texture finds the triangle covering it in the target UVs, takes the same point on the surface in the source UVs, "
 			"and samples the texture there. Use it to move a texture made for overlapping or tiled UV0 onto a unique channel (such as one from UV Layouts), or between any two layouts."),
-		SettingsAndPreview(SettingsColumn, PreviewColumn));
+		VrrMenu::SettingsAndPreview(SettingsColumn, PreviewColumn));
 }
 
 /** Target UVs, resolution and sampling | the finished bake. */
@@ -308,7 +294,7 @@ TSharedRef<SWidget> SMenu_RebakeTexture::CreateTargetSection()
 		TAttribute<bool>::CreateLambda([this]() { return ResultPreviewTexture != nullptr; }),
 		TAttribute<FText>::CreateSP(this, &SMenu_RebakeTexture::GetResultCaption));
 
-	return VrrMenu::Card(LOCTEXT("TargetHeader", "Target"), SettingsAndPreview(SettingsColumn, PreviewColumn));
+	return VrrMenu::Card(LOCTEXT("TargetHeader", "Target"), VrrMenu::SettingsAndPreview(SettingsColumn, PreviewColumn));
 }
 
 /** Compression, sRGB, alpha, texture group and mips: start as the source texture's. */

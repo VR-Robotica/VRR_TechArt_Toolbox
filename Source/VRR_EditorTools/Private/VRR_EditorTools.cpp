@@ -2,7 +2,7 @@
  * VRR_EditorTools module: registers the Toolbox window and the menu/toolbar entries that open it.
  *
  * The window is a dockable tab: a header image on top, a page toolbar on the left, and a widget switcher
- * holding one page per tool (Validate, Texture Packer, Bake Normals, UV Layouts, Mesh Maps, Control Rig).
+ * holding one page per tool (Validate, Texture Packer, Bake Normals, UV Layouts, Rebake, Consolidate, Mesh Maps, Control Rig, VAT).
  * Each page lives in its own Menu_<Page> widget (UI) backed by Core_<Page> (the actual work), so this file
  * only wires things together.
  */
@@ -15,8 +15,10 @@
 #include "Menu_BakeNormals.h"
 #include "Menu_UVLayout.h"
 #include "Menu_RebakeTexture.h"
+#include "Menu_ConsolidateMaterials.h"
 #include "Menu_BakeMaps.h"
 #include "Menu_ControlRig.h"
+#include "Menu_VATBake.h"
 
 #include "ToolMenus.h"
 #include "LevelEditor.h"
@@ -192,10 +194,14 @@ const TArray<FVRR_EditorTools::FPageInfo>& FVRR_EditorTools::GetPages()
 			LOCTEXT("UVLayoutDesc", "Build a unique UV channel (usually UV1) from a mesh's islands, with even texel density and one region per material."), "VrrTools.Page.UVLayout" },
 		{ EToolPage::RebakeTexture, LOCTEXT("RebakeTab", "Rebake"), LOCTEXT("RebakeTitle", "Rebake Texture Map to UV Set"),
 			LOCTEXT("RebakeDesc", "Move a texture from one UV channel of a mesh to another: sampled through the source UVs, written through the target UVs."), "VrrTools.Page.Rebake" },
+		{ EToolPage::ConsolidateMaterials, LOCTEXT("ConsolidateTab", "Consolidate"), LOCTEXT("ConsolidateTitle", "Consolidate Materials Texture Sets"),
+			LOCTEXT("ConsolidateDesc", "Bake every material on a multi-material mesh (Base Color, Metallic, Roughness, Normal...) through one UV channel into a single texture set."), "VrrTools.Page.Consolidate" },
 		{ EToolPage::BakeMaps, LOCTEXT("MapsTab", "Mesh Maps"), LOCTEXT("MapsTitle", "Bake Mesh Maps"),
 			LOCTEXT("MapsDesc", "Bake Cavity, Edge, Curvature and AO masks from a mesh's own geometry."), "VrrTools.Page.MeshMaps" },
 		{ EToolPage::ControlRig, LOCTEXT("RigTab", "Rig"), LOCTEXT("RigTitle", "Control Rig Generator"),
 			LOCTEXT("RigDesc", "Generate a Modular Control Rig for a character's skeletal mesh."), "VrrTools.Page.Rig" },
+		{ EToolPage::VATBake, LOCTEXT("VATTab", "VAT"), LOCTEXT("VATTitle", "Vertex Animation Textures"),
+			LOCTEXT("VATDesc", "Set up an AnimToTexture Data Asset: pick a skeletal mesh, its animations, and Bone or Vertex baking."), "VrrTools.Page.VAT" },
 	};
 	return Pages;
 }
@@ -255,6 +261,8 @@ TSharedRef<SDockTab> FVRR_EditorTools::OnSpawnTabWindow(const FSpawnTabArgs& Spa
 				+ SWidgetSwitcher::Slot()[ PageSlot(SNew(SMenu_RebakeTexture)) ]
 				+ SWidgetSwitcher::Slot()[ PageSlot(SNew(SMenu_BakeMaps)) ]
 				+ SWidgetSwitcher::Slot()[ PageSlot(SNew(SMenu_ControlRig)) ]
+				+ SWidgetSwitcher::Slot()[ PageSlot(SNew(SMenu_VATBake)) ]
+				+ SWidgetSwitcher::Slot()[ PageSlot(SNew(SMenu_ConsolidateMaterials)) ]
 			]
 		]
 	];

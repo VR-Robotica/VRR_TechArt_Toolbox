@@ -213,23 +213,6 @@ void SMenu_UVLayout::Construct(const FArguments& InArgs)
 }
 
 // LAYOUT
-namespace
-{
-	/** Settings on the left (filling the width), the preview on the right. */
-	TSharedRef<SWidget> SettingsAndPreview(const TSharedRef<SWidget>& SettingsColumn, const TSharedRef<SWidget>& PreviewColumn)
-	{
-		return SNew(SHorizontalBox)
-			+ SHorizontalBox::Slot().FillWidth(1.0f).VAlign(VAlign_Top).Padding(0.0f, 0.0f, VrrMenu::CardGap, 0.0f)
-			[
-				SettingsColumn
-			]
-			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Top)
-			[
-				PreviewColumn
-			];
-	}
-}
-
 /** A UV channel combo writing into *Value. Target combos label the lightmap and new channels. */
 TSharedRef<SWidget> SMenu_UVLayout::CreateChannelCombo(TSharedPtr<SComboBox<TSharedPtr<int32>>>& OutCombo, TArray<TSharedPtr<int32>>* Options, int32* Value, bool bTarget)
 {
@@ -410,7 +393,7 @@ TSharedRef<SWidget> SMenu_UVLayout::CreateBalancedSection()
 	return VrrMenu::HelpCard(LOCTEXT("BalancedHeader", "Balanced UV Layout"),
 		LOCTEXT("BalancedHelp", "Every island from the source channel is scaled to its 3D size and packed evenly over the whole square, ignoring material slots. "
 			"Use it as the lightmap on static meshes (replacing Unreal's generated lightmap UVs), or as a balanced channel for skinned meshes and custom materials."),
-		SettingsAndPreview(SettingsColumn, CreatePreviewPanel(true)));
+		VrrMenu::SettingsAndPreview(SettingsColumn, CreatePreviewPanel(true)));
 }
 
 /** Padding and resolution defaults for the current use: 2 texels at the mesh's Light Map Resolution as a lightmap, else 4 px at 1024. */
@@ -476,7 +459,7 @@ TSharedRef<SWidget> SMenu_UVLayout::CreateGroupedSection()
 			"Regions fill the whole square in material slot order, so the Vrr UV Region material node can pick one by its number. "
 			"As UDIM tiles, each slot gets a whole tile of its own instead (1001, 1002, ...). "
 			"If the target is the lightmap channel, the lightmap moves up one channel first."),
-		SettingsAndPreview(SettingsColumn, CreatePreviewPanel(false)));
+		VrrMenu::SettingsAndPreview(SettingsColumn, CreatePreviewPanel(false)));
 }
 
 // BEHAVIOR

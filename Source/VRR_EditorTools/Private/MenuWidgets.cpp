@@ -154,6 +154,20 @@ namespace VrrMenu
 			];
 	}
 
+	/** Settings fill the width; the preview keeps its own size on the right. */
+	TSharedRef<SWidget> SettingsAndPreview(const TSharedRef<SWidget>& SettingsColumn, const TSharedRef<SWidget>& PreviewColumn)
+	{
+		return SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().FillWidth(1.0f).VAlign(VAlign_Top).Padding(0.0f, 0.0f, CardGap, 0.0f)
+			[
+				SettingsColumn
+			]
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Top)
+			[
+				PreviewColumn
+			];
+	}
+
 	/** Sub-heading in the card title font. */
 	TSharedRef<SWidget> Header(const FText& Text)
 	{

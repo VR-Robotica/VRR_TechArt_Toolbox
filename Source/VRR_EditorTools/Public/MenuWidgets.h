@@ -58,6 +58,9 @@ namespace VrrMenu
 	/** Label in the label column, Content to its right (left-aligned, at its own size). */
 	TSharedRef<SWidget> Row(const FText& Label, const TSharedRef<SWidget>& Content, const FText& ToolTip = FText::GetEmpty(), const TAttribute<bool>& IsEnabled = true);
 
+	/** Settings column on the left (filling the width), a preview column on the right at its own size. */
+	TSharedRef<SWidget> SettingsAndPreview(const TSharedRef<SWidget>& SettingsColumn, const TSharedRef<SWidget>& PreviewColumn);
+
 	/** Section title (the same font as card titles), for sub-headings inside a card. */
 	TSharedRef<SWidget> Header(const FText& Text);
 

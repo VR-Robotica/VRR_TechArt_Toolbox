@@ -28,6 +28,10 @@
 	],
 	"Plugins": [
 		{
+			"Name": "AnimToTexture",
+			"Enabled": true
+		},
+		{
 			"Name": "ControlRig",
 			"Enabled": true
 		},

@@ -58,6 +58,7 @@ namespace TextureValidator
 		{ TEXT("Metal"), EKind::Single }, { TEXT("AO"), EKind::Single }, { TEXT("H"), EKind::Single },
 		{ TEXT("Height"), EKind::Single }, { TEXT("O"), EKind::Single }, { TEXT("Opacity"), EKind::Single },
 		{ TEXT("Curvature"), EKind::Single }, { TEXT("Cavity"), EKind::Single }, { TEXT("Edge"), EKind::Single },
+		{ TEXT("S"), EKind::Single }, { TEXT("Spec"), EKind::Single }, { TEXT("OM"), EKind::Single },	// Specular, Opacity Mask (Toolbox > Consolidate)
 		// Texture Packer output: any compression is fine
 		{ TEXT("Packed"), EKind::Any },
 		{ TEXT("SmoothN"), EKind::Any },
@@ -109,6 +110,7 @@ namespace TextureValidator
 		{ TEXT("Disp"), TEXT("H") }, { TEXT("Displacement"), TEXT("H") }, { TEXT("Bump"), TEXT("H") },
 		{ TEXT("Emit"), TEXT("E") }, { TEXT("Emission"), TEXT("E") }, { TEXT("Glow"), TEXT("E") },
 		{ TEXT("Alpha"), TEXT("O") }, { TEXT("Opac"), TEXT("O") },
+		{ TEXT("Specular"), TEXT("S") }, { TEXT("OpacityMask"), TEXT("OM") },
 		{ TEXT("Masks"), TEXT("Mask") },
 	};
 
@@ -390,8 +392,10 @@ namespace TextureValidator
 			// Color data is stored in sRGB; everything else (normals, masks, single channels) must be linear,
 			// or the GPU "decodes" values that were never encoded and the data comes out wrong.
 			const bool bWantsSRGB = SuffixRule->Kind == EKind::Color;
+			// HDR color (such as a consolidated emissive) is float data, stored linear
+			const bool bLinearHDR = SuffixRule->Kind == EKind::Color && (Compression == TC_HDR || Compression == TC_HDR_F32) && !Texture->SRGB;
 
-			if (Texture->SRGB != bWantsSRGB)
+			if (Texture->SRGB != bWantsSRGB && !bLinearHDR)
 			{
 				AddIssue(ESeverity::Error, Rule, bWantsSRGB
 					? LOCTEXT("NeedsSRGB", "Color texture should have sRGB on")

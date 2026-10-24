@@ -41,6 +41,8 @@ public class VRR_EditorTools : ModuleRules
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
+				"AnimToTexture",
+				"AnimToTextureEditor",
 				"AssetRegistry",
 				"AssetTools",
 				"ContentBrowser",
@@ -56,6 +58,8 @@ public class VRR_EditorTools : ModuleRules
 				"ImageCore",
 				"InputCore",
 				"Json",
+				"MaterialBaking",
+				"MaterialEditor",
 				"MeshDescription",
 				"PhysicsCore",
 				"Projects",
