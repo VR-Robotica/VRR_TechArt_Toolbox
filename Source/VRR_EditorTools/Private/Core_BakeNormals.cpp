@@ -24,7 +24,6 @@
 
 #include "Core_BakeNormals.h"
 
-#include "AssetRegistry/AssetRegistryModule.h"
 #include "Core_Common.h"
 #include "Engine/SkeletalMesh.h"
 #include "Engine/SkinnedAssetCommon.h"
@@ -37,7 +36,6 @@
 #include "SkeletalMeshTypes.h"
 #include "StaticMeshAttributes.h"
 #include "StaticMeshOperations.h"
-#include "UObject/Package.h"
 
 #define LOCTEXT_NAMESPACE "SmoothNormalBaker"
 
@@ -571,7 +569,7 @@ namespace BakeNormalsImpl
 		const bool bTangentSpace = Space == ESpace::Tangent;
 		const int32 Size = Resolution;
 
-		// Pick a free asset name first, so nothing is changed if the path is bad
+		// Check the output path first, so nothing is changed if it's bad
 		FString PackageName, AssetName;
 		if (!VrrCore::MakeUniqueAssetPath(OutputFolder, OutputName, PackageName, AssetName))
 		{
@@ -696,55 +694,20 @@ namespace BakeNormalsImpl
 			}
 		}
 
-		// 3. Pad the islands so bilinear filtering at their edges stays on valid data
-		TArray<int32> NewlyFilled;
-		for (int32 Pass = 0; Pass < Padding; ++Pass)
+		// 3. Pad the islands so bilinear filtering at their edges stays on valid data. Each pass fills empty texels
+		//    next to filled ones: the direction is the re-normalized sum of the neighbors, the mask their average.
+		VrrCore::PadIslands(Size, Padding, Filled, [&](int32 Index, TConstArrayView<int32> Neighbors)
 		{
-			NewlyFilled.Reset();
-			for (int32 Y = 0; Y < Size; ++Y)
+			FVector3f Sum = FVector3f::ZeroVector;
+			float MaskSum = 0.0f;
+			for (const int32 Neighbor : Neighbors)
 			{
-				for (int32 X = 0; X < Size; ++X)
-				{
-					const int32 Index = Y * Size + X;
-					if (Filled[Index])
-					{
-						continue;
-					}
-
-					FVector3f Sum = FVector3f::ZeroVector;
-					float MaskSum = 0.0f;
-					int32 Count = 0;
-					for (int32 DY = -1; DY <= 1; ++DY)
-					{
-						for (int32 DX = -1; DX <= 1; ++DX)
-						{
-							const int32 NX = X + DX;
-							const int32 NY = Y + DY;
-							if ((DX || DY) && NX >= 0 && NX < Size && NY >= 0 && NY < Size && Filled[NY * Size + NX])
-							{
-								Sum += Texels[NY * Size + NX];
-								MaskSum += MaskTexels[NY * Size + NX];
-								++Count;
-							}
-						}
-					}
-					if (Count > 0)
-					{
-						Texels[Index] = Sum.GetSafeNormal();
-						MaskTexels[Index] = MaskSum / Count;
-						NewlyFilled.Add(Index);
-					}
-				}
+				Sum += Texels[Neighbor];
+				MaskSum += MaskTexels[Neighbor];
 			}
-			if (NewlyFilled.IsEmpty())
-			{
-				break;
-			}
-			for (const int32 Index : NewlyFilled)
-			{
-				Filled[Index] = true;
-			}
-		}
+			Texels[Index] = Sum.GetSafeNormal();
+			MaskTexels[Index] = MaskSum / Neighbors.Num();
+		});
 
 		// 4. Encode to BGRA8 (empty texels point straight out) and count UV conflicts
 		SlowTask.EnterProgressFrame(1.0f, LOCTEXT("CreatingTexture", "Creating texture..."));
@@ -761,9 +724,14 @@ namespace BakeNormalsImpl
 			NumConflicts += Conflict[Index] ? 1 : 0;
 		}
 
-		// 5. Create the texture asset (unsaved, like the other Toolbox outputs)
-		UPackage* Package = CreatePackage(*PackageName);
-		UTexture2D* NewTexture = NewObject<UTexture2D>(Package, *AssetName, RF_Public | RF_Standalone | RF_Transactional);
+		// 5. Create the texture asset at the first free name (unsaved, like the other Toolbox outputs)
+		FText Error;
+		UTexture2D* NewTexture = VrrCore::FindOrCreateTexture(OutputFolder, OutputName, false, Error);
+		if (!NewTexture)
+		{
+			OutMessage = Error;
+			return false;
+		}
 		NewTexture->PreEditChange(nullptr);
 		NewTexture->Source.Init(Size, Size, 1, 1, TSF_BGRA8, Pixels.GetData());
 
@@ -775,14 +743,12 @@ namespace BakeNormalsImpl
 		NewTexture->NeverStream = true;
 		NewTexture->Filter = TF_Bilinear;
 		NewTexture->PostEditChange();
-
-		FAssetRegistryModule::AssetCreated(NewTexture);
-		Package->MarkPackageDirty();
+		NewTexture->MarkPackageDirty();
 
 		CreatedTexture = NewTexture;
 
 		OutMessage = FText::Format(LOCTEXT("TextureBaked", "Created {0} ({1}x{1}, UV {2}, {3} space)."),
-			FText::FromString(AssetName), Size, UVChannel, bTangentSpace ? LOCTEXT("Tangent", "tangent") : LOCTEXT("Object", "object"));
+			FText::FromString(NewTexture->GetName()), Size, UVChannel, bTangentSpace ? LOCTEXT("Tangent", "tangent") : LOCTEXT("Object", "object"));
 
 		if (NumConflicts > 0)
 		{

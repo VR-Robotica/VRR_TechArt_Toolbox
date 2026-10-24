@@ -1,3 +1,10 @@
+// Fill out your copyright notice in the Description page of Project Settings.
+
+/*
+ * Legacy template: maps the placeholder commands CMD_CustomFunction_01-04 to buttons that only log a line.
+ * Nothing in the Toolbox creates an FTAT_MenuBehaviors, so this code doesn't run. Kept as a reference for
+ * wiring commands to actions; the live mapping is FVRR_EditorTools::MapCommandListActions.
+ */
 #include "TAT_MenuBehaviors.h"
 #include "VRR_EditorToolsCommands.h"
 

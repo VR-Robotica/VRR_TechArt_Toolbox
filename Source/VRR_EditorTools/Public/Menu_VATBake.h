@@ -85,7 +85,6 @@ private:
 	/** Re-reads the active master material's parameters (on material or mode change). */
 	void RefreshMaterialInfo();
 	FText GetCreatedSetInfo() const;
-	FReply OnUseSelectedMeshClicked();
 	FReply OnUseSelectedAnimsClicked();
 	FReply OnCreateClicked();
 	FReply OnBakeClicked();

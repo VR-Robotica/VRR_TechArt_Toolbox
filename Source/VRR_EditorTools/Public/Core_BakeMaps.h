@@ -42,6 +42,8 @@ struct FMeshMapBakeSettings
 	int32 Resolution = 2048;
 	int32 Padding = 8;
 	bool bSplitTextures = false;	// default: one packed mask, _CCE (RGB) or with AO _CCEA (RGBA, A = AO)
+	/** One texture set per shading model of the mesh's materials (<Base>_DefaultLit_CCE...), each drawing only its slots' triangles. For materials whose UVs overlap. */
+	bool bSplitByShadingModel = false;
 	bool bOverwrite = true;
 	FString OutputFolder;
 	FString OutputBaseName;

@@ -16,16 +16,10 @@
 #include "MenuWidgets.h"
 #include "MeshDescription.h"
 #include "Misc/PackageName.h"
-#include "PropertyCustomizationHelpers.h"
 #include "SEnumCombo.h"
-#include "Styling/AppStyle.h"
-#include "Widgets/Images/SImage.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SComboBox.h"
-#include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
-#include "Widgets/Layout/SScaleBox.h"
-#include "Widgets/SOverlay.h"
 #include "Widgets/Text/STextBlock.h"
 
 #define LOCTEXT_NAMESPACE "SMenu_RebakeTexture"
@@ -42,24 +36,6 @@ namespace
 		return Samples <= 1 ? LOCTEXT("SupersampleOff", "Off (1 sample)") : FText::Format(LOCTEXT("SupersampleN", "{0} x {0} ({1} samples)"), Samples, Samples * Samples);
 	}
 
-	/** A combo over int32 options, labelled by GetLabel, writing into *Value. */
-	TSharedRef<SWidget> MakeIntCombo(TArray<TSharedPtr<int32>>* Options, int32* Value, TFunction<FText(int32)> GetLabel)
-	{
-		return SNew(SComboBox<TSharedPtr<int32>>)
-			.OptionsSource(Options)
-			.OnGenerateWidget_Lambda([GetLabel](TSharedPtr<int32> Option) { return SNew(STextBlock).Text(GetLabel(*Option)); })
-			.OnSelectionChanged_Lambda([Value](TSharedPtr<int32> Option, ESelectInfo::Type)
-			{
-				if (Option.IsValid())
-				{
-					*Value = *Option;
-				}
-			})
-			[
-				SNew(STextBlock).Text_Lambda([Value, GetLabel]() { return GetLabel(*Value); })
-			];
-	}
-
 	/** A combo over a UENUM, writing into *Value. */
 	template <typename EnumType>
 	TSharedRef<SWidget> MakeEnumCombo(TEnumAsByte<EnumType>* Value)
@@ -69,39 +45,11 @@ namespace
 			.OnEnumSelectionChanged_Lambda([Value](int32 NewValue, ESelectInfo::Type) { *Value = static_cast<EnumType>(NewValue); });
 	}
 
-	/** An asset picker with a "Use Selected" button next to it. */
-	TSharedRef<SWidget> MakeAssetPicker(TSharedRef<SWidget> Picker, FOnClicked OnUseSelected, const FText& ToolTip)
-	{
-		return SNew(SHorizontalBox)
-			+ SHorizontalBox::Slot().AutoWidth()
-			[
-				SNew(SBox)
-				.WidthOverride(VrrMenu::WideWidth)
-				[
-					Picker
-				]
-			]
-			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(8.0f, 0.0f, 0.0f, 0.0f)
-			[
-				SNew(SButton)
-				.Text(LOCTEXT("UseSelection", "Use Selected"))
-				.ToolTipText(ToolTip)
-				.OnClicked(OnUseSelected)
-			];
-	}
 }
 
 /** Builds the page: source (settings | texture), target (settings | bake), compression, then save and rebake. */
 void SMenu_RebakeTexture::Construct(const FArguments& InArgs)
 {
-	for (int32 Size : { 256, 512, 1024, 2048, 4096, 8192 })
-	{
-		ResolutionOptions.Add(MakeShared<int32>(Size));
-	}
-	for (int32 Samples : { 1, 2, 3, 4 })
-	{
-		SupersamplingOptions.Add(MakeShared<int32>(Samples));
-	}
 	FilterOptions.Add(MakeShared<ERebakeFilter>(ERebakeFilter::Bilinear));
 	FilterOptions.Add(MakeShared<ERebakeFilter>(ERebakeFilter::Nearest));
 
@@ -117,65 +65,14 @@ void SMenu_RebakeTexture::Construct(const FArguments& InArgs)
 }
 
 // LAYOUT
-/** A UV channel combo ("UV0", "UV1"...) writing into *Value. */
-TSharedRef<SWidget> SMenu_RebakeTexture::CreateChannelCombo(TSharedPtr<SComboBox<TSharedPtr<int32>>>& OutCombo, int32* Value)
-{
-	return SAssignNew(OutCombo, SComboBox<TSharedPtr<int32>>)
-		.OptionsSource(&ChannelOptions)
-		.OnGenerateWidget_Lambda([](TSharedPtr<int32> Option) { return SNew(STextBlock).Text(FText::Format(LOCTEXT("UVN", "UV{0}"), *Option)); })
-		.OnSelectionChanged_Lambda([this, Value](TSharedPtr<int32> Option, ESelectInfo::Type)
-		{
-			if (Option.IsValid())
-			{
-				*Value = *Option;
-				if (Texture.IsValid() && Value == &Settings.TargetChannel)
-				{
-					Settings.OutputName = TextureRebaker::SuggestName(Texture.Get(), Settings.TargetChannel);
-				}
-			}
-		})
-		[
-			SNew(STextBlock).Text_Lambda([this, Value]() { return Mesh.IsValid() ? FText::Format(LOCTEXT("UVN", "UV{0}"), *Value) : FText::GetEmpty(); })
-		];
-}
-
-/** A dark square showing the texture (aspect kept), or a hint when there is none, with a caption under it. */
+/** A preview square (VrrMenu::TexturePreview) with a caption under it. */
 TSharedRef<SWidget> SMenu_RebakeTexture::CreateTexturePreview(const FSlateBrush* Brush, TAttribute<bool> HasTexture, TAttribute<FText> Caption)
 {
 	return SNew(SBox)
 		.WidthOverride(PreviewSize)
 		[
 			VrrMenu::Rows({
-				SNew(SBox)
-				.WidthOverride(PreviewSize)
-				.HeightOverride(PreviewSize)
-				[
-					SNew(SBorder)
-					.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
-					.BorderBackgroundColor(FLinearColor(0.012f, 0.012f, 0.014f, 1.0f))
-					.Padding(0.0f)
-					.HAlign(HAlign_Center)
-					.VAlign(VAlign_Center)
-					[
-						SNew(SOverlay)
-						+ SOverlay::Slot()
-						[
-							SNew(SScaleBox)
-							.Stretch(EStretch::ScaleToFit)
-							.Visibility_Lambda([HasTexture]() { return HasTexture.Get() ? EVisibility::Visible : EVisibility::Collapsed; })
-							[
-								SNew(SImage).Image(Brush)
-							]
-						]
-						+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Center)
-						[
-							SNew(STextBlock)
-							.Text(LOCTEXT("NoPreview", "No texture"))
-							.ColorAndOpacity(FSlateColor::UseSubduedForeground())
-							.Visibility_Lambda([HasTexture]() { return HasTexture.Get() ? EVisibility::Collapsed : EVisibility::Visible; })
-						]
-					]
-				],
+				VrrMenu::TexturePreview(Brush, PreviewSize, HasTexture),
 				VrrMenu::HelpText(Caption),
 			})
 		];
@@ -184,12 +81,7 @@ TSharedRef<SWidget> SMenu_RebakeTexture::CreateTexturePreview(const FSlateBrush*
 void SMenu_RebakeTexture::SetPreviewTexture(FSlateBrush& Brush, TObjectPtr<UTexture2D>& OutHeld, UTexture2D* NewTexture)
 {
 	OutHeld = NewTexture;
-	Brush = FSlateBrush();
-	Brush.DrawAs = ESlateBrushDrawType::Image;
-	Brush.SetResourceObject(NewTexture);
-	Brush.ImageSize = NewTexture
-		? FVector2D(static_cast<double>(FMath::Max<int64>(NewTexture->Source.GetSizeX(), 1)), static_cast<double>(FMath::Max<int64>(NewTexture->Source.GetSizeY(), 1)))
-		: FVector2D(1.0, 1.0);
+	VrrMenu::SetBrushTexture(Brush, NewTexture);
 }
 
 void SMenu_RebakeTexture::AddReferencedObjects(FReferenceCollector& Collector)
@@ -215,31 +107,21 @@ TSharedRef<SWidget> SMenu_RebakeTexture::CreateSourceSection()
 {
 	TSharedRef<SWidget> SettingsColumn = VrrMenu::Rows({
 		VrrMenu::Row(LOCTEXT("MeshLabel", "Mesh"),
-			MakeAssetPicker(
-				SNew(SObjectPropertyEntryBox)
-				.AllowedClass(UStreamableRenderAsset::StaticClass())
-				.OnShouldFilterAsset_Lambda([](const FAssetData& AssetData)
-				{
-					return !AssetData.IsInstanceOf(UStaticMesh::StaticClass()) && !AssetData.IsInstanceOf(USkeletalMesh::StaticClass());
-				})
-				.ObjectPath_Lambda([this]() { return Mesh.IsValid() ? Mesh->GetPathName() : FString(); })
-				.OnObjectChanged_Lambda([this](const FAssetData& AssetData) { SetMesh(AssetData.GetAsset()); })
-				.DisplayThumbnail(true),
-				FOnClicked::CreateSP(this, &SMenu_RebakeTexture::OnUseSelectedMeshClicked),
-				LOCTEXT("UseSelectedMeshTip", "Use the static or skeletal mesh selected in the Content Browser"))),
+			VrrMenu::MeshPicker(VrrMenu::EMeshTypes::StaticOrSkeletal,
+				[this]() { return Mesh.Get(); },
+				[this](UObject* NewMesh) { SetMesh(NewMesh); },
+				[this](const FText& Error) { SetStatus(Error, true); })),
 		VrrMenu::Note(TAttribute<FText>::CreateSP(this, &SMenu_RebakeTexture::GetMeshInfoText)),
 		VrrMenu::Row(LOCTEXT("TextureLabel", "Texture"),
-			MakeAssetPicker(
-				SNew(SObjectPropertyEntryBox)
-				.AllowedClass(UTexture2D::StaticClass())
-				.ObjectPath_Lambda([this]() { return Texture.IsValid() ? Texture->GetPathName() : FString(); })
-				.OnObjectChanged_Lambda([this](const FAssetData& AssetData) { SetTexture(Cast<UTexture2D>(AssetData.GetAsset())); })
-				.DisplayThumbnail(true),
-				FOnClicked::CreateSP(this, &SMenu_RebakeTexture::OnUseSelectedTextureClicked),
-				LOCTEXT("UseSelectedTextureTip", "Use the texture selected in the Content Browser"))),
+			VrrMenu::AssetPicker(UTexture2D::StaticClass(), nullptr,
+				[this]() { return Texture.Get(); },
+				[this](UObject* NewTexture) { SetTexture(Cast<UTexture2D>(NewTexture)); },
+				LOCTEXT("UseSelectedTextureTip", "Use the texture selected in the Content Browser"),
+				LOCTEXT("NoTextureSelected", "Select a texture in the Content Browser first."),
+				[this](const FText& Error) { SetStatus(Error, true); })),
 		VrrMenu::Note(TAttribute<FText>::CreateSP(this, &SMenu_RebakeTexture::GetTextureInfoText)),
 		VrrMenu::Row(LOCTEXT("SourceUVs", "Source UVs"),
-			CreateChannelCombo(SourceCombo, &Settings.SourceChannel),
+			VrrMenu::UVChannelCombo([this]() { return NumUVChannels; }, &Settings.SourceChannel),
 			LOCTEXT("SourceUVsTip", "The channel the texture was made for (usually UV0)")),
 	});
 
@@ -258,10 +140,10 @@ TSharedRef<SWidget> SMenu_RebakeTexture::CreateTargetSection()
 {
 	TSharedRef<SWidget> SettingsColumn = VrrMenu::Rows({
 		VrrMenu::Row(LOCTEXT("TargetUVs", "Target UVs"),
-			CreateChannelCombo(TargetCombo, &Settings.TargetChannel),
+			VrrMenu::UVChannelCombo([this]() { return NumUVChannels; }, &Settings.TargetChannel, [this](int32) { RefreshOutputName(); }),
 			LOCTEXT("TargetUVsTip", "The channel the new texture is laid out in. It should be unique (no overlapping islands), or overlapping parts share texels")),
 		VrrMenu::Row(LOCTEXT("Resolution", "Resolution"),
-			MakeIntCombo(&ResolutionOptions, &Settings.Resolution, [](int32 Size) { return FText::AsNumber(Size, &FNumberFormattingOptions::DefaultNoGrouping()); }),
+			VrrMenu::ResolutionCombo(&Settings.Resolution),
 			LOCTEXT("ResolutionTip", "Width and height of the new texture. Starts at the source texture's size")),
 		VrrMenu::Row(LOCTEXT("Filter", "Filter"),
 			SNew(SComboBox<TSharedPtr<ERebakeFilter>>)
@@ -279,7 +161,7 @@ TSharedRef<SWidget> SMenu_RebakeTexture::CreateTargetSection()
 			],
 			LOCTEXT("FilterTip", "Bilinear blends the four nearest source texels (smooth). Nearest takes the closest one (crisp pixel art, ID masks)")),
 		VrrMenu::Row(LOCTEXT("Supersampling", "Supersampling"),
-			MakeIntCombo(&SupersamplingOptions, &Settings.Supersampling, &GetSupersamplingLabel),
+			VrrMenu::IntCombo([]() { return TArray<int32>{ 1, 2, 3, 4 }; }, &Settings.Supersampling, &GetSupersamplingLabel),
 			LOCTEXT("SupersamplingTip", "Samples per texel. More smooths island edges and keeps detail when the new layout is smaller than the source; time grows with the sample count")),
 		VrrMenu::Row(LOCTEXT("NormalMap", "Normal map"),
 			VrrMenu::CheckBox(&Settings.bNormalMap, LOCTEXT("NormalMapCheck", "Rotate normals to the target UVs"),
@@ -364,28 +246,14 @@ void SMenu_RebakeTexture::SetMesh(UObject* NewMesh)
 	NumUVChannels = Mesh.IsValid() ? VrrCore::GetNumUVChannels(Mesh.Get()) : 0;
 	StatusText = FText::GetEmpty();
 
-	ChannelOptions.Reset();
-	for (int32 Channel = 0; Channel < NumUVChannels; ++Channel)
-	{
-		ChannelOptions.Add(MakeShared<int32>(Channel));
-	}
 	Settings.SourceChannel = 0;
 	Settings.TargetChannel = FMath::Min(1, FMath::Max(NumUVChannels - 1, 0));
-	for (TSharedPtr<SComboBox<TSharedPtr<int32>>> Combo : { SourceCombo, TargetCombo })
-	{
-		if (Combo.IsValid())
-		{
-			Combo->RefreshOptions();
-		}
-	}
-	if (SourceCombo.IsValid())
-	{
-		SourceCombo->SetSelectedItem(ChannelOptions.IsValidIndex(Settings.SourceChannel) ? ChannelOptions[Settings.SourceChannel] : nullptr);
-	}
-	if (TargetCombo.IsValid())
-	{
-		TargetCombo->SetSelectedItem(ChannelOptions.IsValidIndex(Settings.TargetChannel) ? ChannelOptions[Settings.TargetChannel] : nullptr);
-	}
+	RefreshOutputName();
+}
+
+/** <texture>_UV<target channel>, once there is a texture. */
+void SMenu_RebakeTexture::RefreshOutputName()
+{
 	if (Texture.IsValid())
 	{
 		Settings.OutputName = TextureRebaker::SuggestName(Texture.Get(), Settings.TargetChannel);
@@ -402,7 +270,7 @@ void SMenu_RebakeTexture::SetTexture(UTexture2D* NewTexture)
 	{
 		TextureRebaker::CopyTextureSettings(NewTexture, Settings);
 		Settings.OutputFolder = FPackageName::GetLongPackagePath(NewTexture->GetOutermost()->GetName());
-		Settings.OutputName = TextureRebaker::SuggestName(NewTexture, Settings.TargetChannel);
+		RefreshOutputName();
 	}
 }
 
@@ -475,36 +343,7 @@ FText SMenu_RebakeTexture::GetRebakeBlocker() const
 	return FText::GetEmpty();
 }
 
-/** Picks the first Static or Skeletal Mesh selected in the Content Browser. */
-FReply SMenu_RebakeTexture::OnUseSelectedMeshClicked()
-{
-	for (const FAssetData& Asset : VrrCore::GetSelectedAssets())
-	{
-		if (Asset.IsInstanceOf(UStaticMesh::StaticClass()) || Asset.IsInstanceOf(USkeletalMesh::StaticClass()))
-		{
-			SetMesh(Asset.GetAsset());
-			return FReply::Handled();
-		}
-	}
-	SetStatus(LOCTEXT("NoMeshSelected", "Select a Static Mesh or Skeletal Mesh in the Content Browser first."), true);
-	return FReply::Handled();
-}
-
-/** Picks the first texture selected in the Content Browser. */
-FReply SMenu_RebakeTexture::OnUseSelectedTextureClicked()
-{
-	for (const FAssetData& Asset : VrrCore::GetSelectedAssets())
-	{
-		if (Asset.IsInstanceOf(UTexture2D::StaticClass()))
-		{
-			SetTexture(Cast<UTexture2D>(Asset.GetAsset()));
-			return FReply::Handled();
-		}
-	}
-	SetStatus(LOCTEXT("NoTextureSelected", "Select a texture in the Content Browser first."), true);
-	return FReply::Handled();
-}
-
+/** Copies the source texture's compression, sRGB and LOD group settings into the output settings. */
 FReply SMenu_RebakeTexture::OnCopySettingsClicked()
 {
 	TextureRebaker::CopyTextureSettings(Texture.Get(), Settings);

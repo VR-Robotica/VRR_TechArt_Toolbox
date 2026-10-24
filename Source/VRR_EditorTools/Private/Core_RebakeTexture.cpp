@@ -18,17 +18,13 @@
 
 #include "Core_RebakeTexture.h"
 
-#include "AssetRegistry/AssetRegistryModule.h"
 #include "Core_Common.h"
 #include "Engine/Texture2D.h"
-#include "FileHelpers.h"
 #include "ImageCore.h"
 #include "ImageCoreUtils.h"
 #include "MeshDescription.h"
-#include "Misc/PackageName.h"
 #include "Misc/ScopedSlowTask.h"
 #include "StaticMeshAttributes.h"
-#include "UObject/Package.h"
 
 #define LOCTEXT_NAMESPACE "TextureRebaker"
 
@@ -132,36 +128,13 @@ namespace RebakeImpl
 	 */
 	UTexture2D* FindOrCreateTexture(const FString& Folder, const FString& Name, bool bOverwrite, const UTexture2D* Source, FText& OutError)
 	{
-		FString AssetName = Name;
-		FString PackageName = Folder / AssetName;
-		if (Name.IsEmpty() || !FPackageName::IsValidLongPackageName(PackageName))
-		{
-			OutError = FText::Format(LOCTEXT("BadPath", "Invalid output path: {0}"), FText::FromString(PackageName));
-			return nullptr;
-		}
-		if (PackageName == Source->GetOutermost()->GetName())
+		// The source is read while the output is written, so they must not be the same asset
+		if ((Folder / Name) == Source->GetOutermost()->GetName())
 		{
 			OutError = LOCTEXT("SameAsSource", "The output name is the source texture. Pick another name, so the source isn't overwritten while it is read.");
 			return nullptr;
 		}
-
-		UTexture2D* Texture = nullptr;
-		if (bOverwrite && (FindPackage(nullptr, *PackageName) || FPackageName::DoesPackageExist(PackageName)))
-		{
-			Texture = LoadObject<UTexture2D>(nullptr, *(PackageName + TEXT(".") + AssetName), nullptr, LOAD_NoWarn | LOAD_Quiet);
-		}
-		if (!Texture)
-		{
-			for (int32 Index = 1; FindPackage(nullptr, *PackageName) || FPackageName::DoesPackageExist(PackageName); ++Index)
-			{
-				AssetName = FString::Printf(TEXT("%s_%02d"), *Name, Index);
-				PackageName = Folder / AssetName;
-			}
-			UPackage* Package = CreatePackage(*PackageName);
-			Texture = NewObject<UTexture2D>(Package, *AssetName, RF_Public | RF_Standalone | RF_Transactional);
-			FAssetRegistryModule::AssetCreated(Texture);
-		}
-		return Texture;
+		return VrrCore::FindOrCreateTexture(Folder, Name, bOverwrite, OutError);
 	}
 }
 
@@ -436,51 +409,16 @@ namespace TextureRebaker
 		}
 		Mean /= static_cast<float>(NumCovered);
 
-		// 4. Padding: each pass fills empty texels next to filled ones with their average
-		TArray<int32> NewlyFilled;
-		for (int32 Pass = 0; Pass < Settings.Padding; ++Pass)
+		// 4. Padding: each pass fills empty texels next to filled ones with the average of those neighbors
+		VrrCore::PadIslands(Size, Settings.Padding, Filled, [&Pixels](int32 Index, TConstArrayView<int32> Neighbors)
 		{
-			NewlyFilled.Reset();
-			for (int32 Y = 0; Y < Size; ++Y)
+			FLinearColor Total = FLinearColor::Transparent;
+			for (const int32 Neighbor : Neighbors)
 			{
-				for (int32 X = 0; X < Size; ++X)
-				{
-					const int32 Index = Y * Size + X;
-					if (Filled[Index])
-					{
-						continue;
-					}
-					FLinearColor Total = FLinearColor::Transparent;
-					int32 Count = 0;
-					for (int32 DY = -1; DY <= 1; ++DY)
-					{
-						for (int32 DX = -1; DX <= 1; ++DX)
-						{
-							const int32 NX = X + DX;
-							const int32 NY = Y + DY;
-							if ((DX || DY) && NX >= 0 && NX < Size && NY >= 0 && NY < Size && Filled[NY * Size + NX])
-							{
-								Total += Pixels[NY * Size + NX];
-								++Count;
-							}
-						}
-					}
-					if (Count > 0)
-					{
-						Pixels[Index] = Total / static_cast<float>(Count);
-						NewlyFilled.Add(Index);
-					}
-				}
+				Total += Pixels[Neighbor];
 			}
-			if (NewlyFilled.IsEmpty())
-			{
-				break;
-			}
-			for (const int32 Index : NewlyFilled)
-			{
-				Filled[Index] = true;
-			}
-		}
+			Pixels[Index] = Total / static_cast<float>(Neighbors.Num());
+		});
 		// The rest: the average color, or a flat normal
 		const FLinearColor Background = Settings.bNormalMap ? FLinearColor(0.5f, 0.5f, 1.0f, 1.0f) : Mean;
 		for (int32 Index = 0; Index < NumTexels; ++Index)
@@ -523,7 +461,7 @@ namespace TextureRebaker
 		bool bSaved = false;
 		if (Settings.bSaveToDisk)
 		{
-			bSaved = UEditorLoadingAndSavingUtils::SavePackages({ Output->GetOutermost() }, false);
+			bSaved = VrrCore::SaveAssets({ Output });
 		}
 
 		// Result: what was made, coverage, then warnings

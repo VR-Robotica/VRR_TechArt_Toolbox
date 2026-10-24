@@ -1,3 +1,14 @@
+// Fill out your copyright notice in the Description page of Project Settings.
+
+/*
+ * The plugin's Slate style set ("VRR_EditorToolsStyle"): every brush and button style the Toolbox window uses.
+ *
+ *  - Initialize/Shutdown register and unregister the set once, from the module's startup and shutdown.
+ *  - Create builds it: the toolbar icon, the logo, the frame/card/badge backgrounds, the sidebar tab button and
+ *    its active/accent brushes, and one icon per page ("VrrTools.Page.<Page>", taken from the editor's own
+ *    Starship SVGs so they match the rest of the editor).
+ *  - A new Toolbox page adds its icon here and names it in its page info (VRR_EditorTools.cpp).
+ */
 #include "VRR_EditorToolsStyle.h"
 #include "Styling/SlateStyleRegistry.h"
 #include "Framework/Application/SlateApplication.h"

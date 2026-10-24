@@ -16,10 +16,8 @@
 
 #include "Core_TexturePacker.h"
 
-#include "AssetRegistry/AssetRegistryModule.h"
 #include "Core_Common.h"
 #include "Engine/Texture2D.h"
-#include "UObject/Package.h"
 
 #define LOCTEXT_NAMESPACE "TexturePacker"
 
@@ -299,17 +297,12 @@ namespace TexturePacker
 		TArray<uint8> PackedData;
 		CombineChannels(Settings, Sources, Size.X, Size.Y, PackedData);
 
-		// 4. Pick a free asset name in the output folder
-		FString PackageName, AssetName;
-		if (!VrrCore::MakeUniqueAssetPath(Folder, Name, PackageName, AssetName))
+		// 4-5. Create the texture asset at the first free name in the output folder (registered with the Content Browser)
+		UTexture2D* NewTexture = VrrCore::FindOrCreateTexture(Folder, Name, false, OutError);
+		if (!NewTexture)
 		{
-			OutError = FText::Format(LOCTEXT("BadPath", "Invalid output path: {0}"), FText::FromString(Folder / Name));
 			return nullptr;
 		}
-
-		// 5. Create the texture asset
-		UPackage* Package = CreatePackage(*PackageName);
-		UTexture2D* NewTexture = NewObject<UTexture2D>(Package, *AssetName, RF_Public | RF_Standalone | RF_Transactional);
 
 		NewTexture->PreEditChange(nullptr);
 		NewTexture->Source.Init(Size.X, Size.Y, 1, 1, TSF_BGRA8, PackedData.GetData());
@@ -333,11 +326,9 @@ namespace TexturePacker
 			|| (Alpha.SourceIndex == INDEX_NONE && FMath::IsNearlyEqual(Alpha.bInvert ? 1.0f - Alpha.DefaultValue : Alpha.DefaultValue, 1.0f));
 		NewTexture->CompressionNoAlpha = bAlphaUnused;
 
-		// 9. Build the platform data, then register the new asset so the Content Browser shows it (unsaved)
+		// 9. Build the platform data and mark it unsaved
 		NewTexture->PostEditChange();
-
-		FAssetRegistryModule::AssetCreated(NewTexture);
-		Package->MarkPackageDirty();
+		NewTexture->MarkPackageDirty();
 
 		return NewTexture;
 	}

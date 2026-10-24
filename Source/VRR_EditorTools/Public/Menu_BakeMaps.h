@@ -4,10 +4,9 @@
 
 #include "CoreMinimal.h"
 #include "Core_BakeMaps.h"
+#include "Core_ConsolidateMaterials.h"
 #include "Input/Reply.h"
 #include "Widgets/SCompoundWidget.h"
-
-template <typename OptionType> class SComboBox;
 
 /**
  * Toolbox "Mesh Maps" page: bakes Cavity, Edge, Curvature and Ambient Occlusion maps from a mesh into textures.
@@ -27,12 +26,8 @@ private:
 	int32 NumUVChannels = 0;
 
 	FMeshMapBakeSettings Settings;
-
-	// Combo box options
-	TArray<TSharedPtr<int32>> UVChannelOptions;
-	TSharedPtr<SComboBox<TSharedPtr<int32>>> UVChannelCombo;
-	TArray<TSharedPtr<int32>> ResolutionOptions;
-	TSharedPtr<int32> Resolution;
+	/** The mesh's material slots grouped by shading model, for the per-shading-model texture names. */
+	TArray<FConsolidateGroup> ShadingModelGroups;
 
 	FText StatusText;
 	bool bStatusIsError = false;
@@ -48,7 +43,6 @@ private:
 	/** Why Bake can't run yet, or empty when it can. */
 	FText GetBakeBlocker() const;
 	FText GetMeshInfoText() const;
-	FReply OnUseSelectionClicked();
 	FReply OnBakeClicked();
 	void SetStatus(const FText& Text, bool bError);
 };

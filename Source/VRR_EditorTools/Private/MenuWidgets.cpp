@@ -4,13 +4,22 @@
  * Shared Slate widgets for the Toolbox pages (Menu_*.cpp), so every page looks and behaves the same.
  * Widgets that edit a value take a pointer to it (usually a member of the page or of its settings struct)
  * and read/write it through lambdas, so the widget always shows the current value.
+ * Widgets that need their own state (a combo's option list, a help toggle) keep it in shared pointers captured
+ * by their lambdas, so pages don't hold option arrays or widget pointers just to keep them working.
  * Brushes (card, logo, tabs) live in FVRR_EditorToolsStyle.
  */
 
 #include "MenuWidgets.h"
 
 #include "Core_Common.h"
+#include "Engine/SkeletalMesh.h"
+#include "Engine/StaticMesh.h"
+#include "Engine/Texture2D.h"
 #include "Framework/Notifications/NotificationManager.h"
+#include "PropertyCustomizationHelpers.h"
+#include "Widgets/Input/SComboBox.h"
+#include "Widgets/Layout/SScaleBox.h"
+#include "Widgets/SOverlay.h"
 #include "Styling/AppStyle.h"
 #include "Styling/CoreStyle.h"
 #include "Styling/StyleColors.h"
@@ -328,6 +337,188 @@ namespace VrrMenu
 				.ColorAndOpacity(FSlateColor::UseForeground())
 			]
 		];
+	}
+
+	TSharedRef<SWidget> IntCombo(TFunction<TArray<int32>()> GetOptions, int32* Value, TFunction<FText(int32)> GetLabel, TFunction<void(int32)> OnChanged)
+	{
+		// The combo owns its option list: the OnGenerateWidget lambda holds it, so it lives exactly as long as the combo
+		using FOptions = TArray<TSharedPtr<int32>>;
+		TSharedRef<FOptions> Options = MakeShared<FOptions>();
+		TSharedRef<TWeakPtr<SComboBox<TSharedPtr<int32>>>> WeakCombo = MakeShared<TWeakPtr<SComboBox<TSharedPtr<int32>>>>();
+
+		// Rebuild the options and select the current value (so closing the list without picking keeps it)
+		auto Refresh = [Options, GetOptions, Value, WeakCombo]()
+		{
+			Options->Reset();
+			TSharedPtr<int32> Current;
+			for (const int32 Option : GetOptions())
+			{
+				Options->Add(MakeShared<int32>(Option));
+				if (Option == *Value)
+				{
+					Current = Options->Last();
+				}
+			}
+			if (TSharedPtr<SComboBox<TSharedPtr<int32>>> Combo = WeakCombo->Pin())
+			{
+				Combo->RefreshOptions();
+				Combo->SetSelectedItem(Current);
+			}
+		};
+
+		TSharedRef<SComboBox<TSharedPtr<int32>>> Combo = SNew(SComboBox<TSharedPtr<int32>>)
+			.OptionsSource(&Options.Get())
+			.OnComboBoxOpening_Lambda(Refresh)
+			.OnGenerateWidget_Lambda([Options, GetLabel](TSharedPtr<int32> Option) { return SNew(STextBlock).Text(GetLabel(*Option)); })
+			.OnSelectionChanged_Lambda([Value, OnChanged](TSharedPtr<int32> Option, ESelectInfo::Type SelectInfo)
+			{
+				// Direct: our own SetSelectedItem in Refresh, which only mirrors *Value
+				if (Option.IsValid() && SelectInfo != ESelectInfo::Direct && *Option != *Value)
+				{
+					*Value = *Option;
+					if (OnChanged)
+					{
+						OnChanged(*Value);
+					}
+				}
+			})
+			[
+				SNew(STextBlock).Text_Lambda([GetOptions, Value, GetLabel]()
+				{
+					// Blank while the current value isn't an option (no mesh yet)
+					return GetOptions().Contains(*Value) ? GetLabel(*Value) : FText::GetEmpty();
+				})
+			];
+		*WeakCombo = Combo;
+		Refresh();
+		return Combo;
+	}
+
+	TSharedRef<SWidget> UVChannelCombo(TFunction<int32()> GetNumChannels, int32* Value, TFunction<void(int32)> OnChanged)
+	{
+		return IntCombo([GetNumChannels]()
+			{
+				TArray<int32> Channels;
+				for (int32 Channel = 0; Channel < GetNumChannels(); ++Channel)
+				{
+					Channels.Add(Channel);
+				}
+				return Channels;
+			},
+			Value,
+			[](int32 Channel) { return FText::Format(LOCTEXT("UVN", "UV{0}"), Channel); },
+			OnChanged);
+	}
+
+	TSharedRef<SWidget> ResolutionCombo(int32* Value, const TArray<int32>& Sizes)
+	{
+		return IntCombo([Sizes]() { return Sizes; }, Value,
+			[](int32 Size) { return FText::AsNumber(Size, &FNumberFormattingOptions::DefaultNoGrouping()); });
+	}
+
+	// ASSETS
+	/** [ picker ] [Use Selected]: both feed OnPicked; the button reports through OnError when nothing usable is selected. */
+	TSharedRef<SWidget> AssetPicker(UClass* AllowedClass, TFunction<bool(const FAssetData&)> IsAllowed,
+		TFunction<UObject*()> GetAsset, TFunction<void(UObject*)> OnPicked,
+		const FText& UseSelectedToolTip, const FText& NothingSelectedError, TFunction<void(const FText&)> OnError)
+	{
+		return SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().AutoWidth()
+			[
+				SNew(SBox)
+				.WidthOverride(WideWidth)
+				[
+					SNew(SObjectPropertyEntryBox)
+					.AllowedClass(AllowedClass)
+					// The filter returns true to hide an asset
+					.OnShouldFilterAsset_Lambda([IsAllowed](const FAssetData& AssetData) { return IsAllowed && !IsAllowed(AssetData); })
+					.ObjectPath_Lambda([GetAsset]()
+					{
+						const UObject* Asset = GetAsset();
+						return Asset ? Asset->GetPathName() : FString();
+					})
+					.OnObjectChanged_Lambda([OnPicked](const FAssetData& AssetData) { OnPicked(AssetData.GetAsset()); })
+					.DisplayThumbnail(true)
+				]
+			]
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(8.0f, 0.0f, 0.0f, 0.0f)
+			[
+				SNew(SButton)
+				.Text(LOCTEXT("UseSelected", "Use Selected"))
+				.ToolTipText(UseSelectedToolTip)
+				.OnClicked_Lambda([IsAllowed, OnPicked, NothingSelectedError, OnError]()
+				{
+					UObject* Selected = VrrCore::GetFirstSelectedAsset([&IsAllowed](const FAssetData& Asset) { return !IsAllowed || IsAllowed(Asset); });
+					if (Selected)
+					{
+						OnPicked(Selected);
+					}
+					else if (OnError)
+					{
+						OnError(NothingSelectedError);
+					}
+					return FReply::Handled();
+				})
+			];
+	}
+
+	TSharedRef<SWidget> MeshPicker(EMeshTypes Types, TFunction<UObject*()> GetMesh, TFunction<void(UObject*)> OnPicked, TFunction<void(const FText&)> OnError)
+	{
+		const bool bSkeletalOnly = Types == EMeshTypes::SkeletalOnly;
+		return AssetPicker(
+			bSkeletalOnly ? USkeletalMesh::StaticClass() : UStreamableRenderAsset::StaticClass(),
+			[bSkeletalOnly](const FAssetData& Asset) { return VrrCore::IsMeshAsset(Asset, bSkeletalOnly); },
+			MoveTemp(GetMesh), MoveTemp(OnPicked),
+			bSkeletalOnly ? LOCTEXT("UseSelectedSkeletalTip", "Use the skeletal mesh selected in the Content Browser")
+				: LOCTEXT("UseSelectedMeshTip", "Use the static or skeletal mesh selected in the Content Browser"),
+			bSkeletalOnly ? LOCTEXT("NoSkeletalSelected", "Select a Skeletal Mesh in the Content Browser first.")
+				: LOCTEXT("NoMeshSelected", "Select a Static Mesh or Skeletal Mesh in the Content Browser first."),
+			MoveTemp(OnError));
+	}
+
+	void SetBrushTexture(FSlateBrush& Brush, UTexture* Texture)
+	{
+		Brush = FSlateBrush();
+		Brush.DrawAs = ESlateBrushDrawType::Image;
+		Brush.SetResourceObject(Texture);
+		const UTexture2D* Texture2D = Cast<UTexture2D>(Texture);
+		Brush.ImageSize = Texture2D
+			? FVector2D(static_cast<double>(FMath::Max<int64>(Texture2D->Source.GetSizeX(), 1)), static_cast<double>(FMath::Max<int64>(Texture2D->Source.GetSizeY(), 1)))
+			: FVector2D(1.0, 1.0);
+	}
+
+	TSharedRef<SWidget> TexturePreview(const FSlateBrush* Brush, float Size, const TAttribute<bool>& HasTexture)
+	{
+		return SNew(SBox)
+			.WidthOverride(Size)
+			.HeightOverride(Size)
+			[
+				SNew(SBorder)
+				.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+				.BorderBackgroundColor(FLinearColor(0.012f, 0.012f, 0.014f, 1.0f))
+				.Padding(0.0f)
+				.HAlign(HAlign_Center)
+				.VAlign(VAlign_Center)
+				[
+					SNew(SOverlay)
+					+ SOverlay::Slot()
+					[
+						SNew(SScaleBox)
+						.Stretch(EStretch::ScaleToFit)
+						.Visibility_Lambda([HasTexture]() { return HasTexture.Get() ? EVisibility::Visible : EVisibility::Collapsed; })
+						[
+							SNew(SImage).Image(Brush)
+						]
+					]
+					+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Center)
+					[
+						SNew(STextBlock)
+						.Text(LOCTEXT("NoPreview", "No texture"))
+						.ColorAndOpacity(FSlateColor::UseSubduedForeground())
+						.Visibility_Lambda([HasTexture]() { return HasTexture.Get() ? EVisibility::Collapsed : EVisibility::Visible; })
+					]
+				]
+			];
 	}
 
 	// ACTIONS

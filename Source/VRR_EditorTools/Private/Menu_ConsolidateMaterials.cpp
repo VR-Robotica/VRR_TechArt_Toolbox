@@ -10,20 +10,11 @@
 #include "Menu_ConsolidateMaterials.h"
 
 #include "Core_Common.h"
-#include "Engine/SkeletalMesh.h"
-#include "Engine/StaticMesh.h"
 #include "Engine/Texture2D.h"
 #include "Materials/MaterialInterface.h"
 #include "MenuWidgets.h"
 #include "Misc/PackageName.h"
-#include "PropertyCustomizationHelpers.h"
-#include "Styling/AppStyle.h"
-#include "Widgets/Images/SImage.h"
-#include "Widgets/Input/SButton.h"
-#include "Widgets/Input/SComboBox.h"
-#include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
-#include "Widgets/Layout/SScaleBox.h"
 #include "Widgets/Layout/SUniformGridPanel.h"
 #include "Widgets/Layout/SWrapBox.h"
 #include "Widgets/SBoxPanel.h"
@@ -54,11 +45,6 @@ namespace
 /** Builds the page: mesh and its slots, target UVs, outputs, then save and consolidate. */
 void SMenu_ConsolidateMaterials::Construct(const FArguments& InArgs)
 {
-	for (int32 Size : { 512, 1024, 2048, 4096, 8192 })
-	{
-		ResolutionOptions.Add(MakeShared<int32>(Size));
-	}
-
 	ChildSlot
 	[
 		VrrMenu::Stack({
@@ -79,37 +65,16 @@ void SMenu_ConsolidateMaterials::AddReferencedObjects(FReferenceCollector& Colle
 /** Mesh picker, its info, and the material slots that will be combined. */
 TSharedRef<SWidget> SMenu_ConsolidateMaterials::CreateMeshSection()
 {
-	TSharedRef<SWidget> MeshPicker = SNew(SHorizontalBox)
-		+ SHorizontalBox::Slot().AutoWidth()
-		[
-			SNew(SBox)
-			.WidthOverride(VrrMenu::WideWidth)
-			[
-				SNew(SObjectPropertyEntryBox)
-				.AllowedClass(UStreamableRenderAsset::StaticClass())
-				.OnShouldFilterAsset_Lambda([](const FAssetData& AssetData)
-				{
-					return !AssetData.IsInstanceOf(UStaticMesh::StaticClass()) && !AssetData.IsInstanceOf(USkeletalMesh::StaticClass());
-				})
-				.ObjectPath_Lambda([this]() { return Mesh.IsValid() ? Mesh->GetPathName() : FString(); })
-				.OnObjectChanged_Lambda([this](const FAssetData& AssetData) { SetMesh(AssetData.GetAsset()); })
-				.DisplayThumbnail(true)
-			]
-		]
-		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(8.0f, 0.0f, 0.0f, 0.0f)
-		[
-			SNew(SButton)
-			.Text(LOCTEXT("UseSelection", "Use Selected"))
-			.ToolTipText(LOCTEXT("UseSelectedMeshTip", "Use the static or skeletal mesh selected in the Content Browser"))
-			.OnClicked(this, &SMenu_ConsolidateMaterials::OnUseSelectedMeshClicked)
-		];
-
 	return VrrMenu::HelpCard(LOCTEXT("MeshHeader", "Mesh"),
 		LOCTEXT("MeshHelp", "Every material slot of the mesh (LOD 0) is rendered through the target UVs, drawing only that slot's triangles. "
 			"Each material runs as it does on the mesh (its own UVs, vertex colors, parameters and math), so the textures hold its final outputs. "
 			"The slots are then combined, so one texture per output covers the whole mesh, ready for a single material sampling the target UVs."),
 		VrrMenu::Rows({
-			VrrMenu::Row(LOCTEXT("MeshLabel", "Mesh"), MeshPicker),
+			VrrMenu::Row(LOCTEXT("MeshLabel", "Mesh"),
+				VrrMenu::MeshPicker(VrrMenu::EMeshTypes::StaticOrSkeletal,
+					[this]() { return Mesh.Get(); },
+					[this](UObject* NewMesh) { SetMesh(NewMesh); },
+					[this](const FText& Error) { SetStatus(Error, true); })),
 			VrrMenu::Note(TAttribute<FText>::CreateSP(this, &SMenu_ConsolidateMaterials::GetMeshInfoText)),
 			VrrMenu::Row(LOCTEXT("SlotsLabel", "Material slots"), SAssignNew(SlotList, SVerticalBox)),
 		}));
@@ -118,41 +83,18 @@ TSharedRef<SWidget> SMenu_ConsolidateMaterials::CreateMeshSection()
 /** Target UVs, resolution and padding. */
 TSharedRef<SWidget> SMenu_ConsolidateMaterials::CreateTargetSection()
 {
-	TSharedRef<SWidget> ChannelCombo = SAssignNew(TargetCombo, SComboBox<TSharedPtr<int32>>)
-		.OptionsSource(&ChannelOptions)
-		.OnGenerateWidget_Lambda([](TSharedPtr<int32> Option) { return SNew(STextBlock).Text(FText::Format(LOCTEXT("UVN", "UV{0}"), *Option)); })
-		.OnSelectionChanged_Lambda([this](TSharedPtr<int32> Option, ESelectInfo::Type)
-		{
-			if (Option.IsValid())
-			{
-				Settings.TargetChannel = *Option;
-			}
-		})
-		[
-			SNew(STextBlock).Text_Lambda([this]() { return Mesh.IsValid() ? FText::Format(LOCTEXT("UVN", "UV{0}"), Settings.TargetChannel) : FText::GetEmpty(); })
-		];
-
-	TSharedRef<SWidget> ResolutionCombo = SNew(SComboBox<TSharedPtr<int32>>)
-		.OptionsSource(&ResolutionOptions)
-		.OnGenerateWidget_Lambda([](TSharedPtr<int32> Option) { return SNew(STextBlock).Text(FText::AsNumber(*Option, &FNumberFormattingOptions::DefaultNoGrouping())); })
-		.OnSelectionChanged_Lambda([this](TSharedPtr<int32> Option, ESelectInfo::Type)
-		{
-			if (Option.IsValid())
-			{
-				Settings.Resolution = *Option;
-			}
-		})
-		[
-			SNew(STextBlock).Text_Lambda([this]() { return FText::AsNumber(Settings.Resolution, &FNumberFormattingOptions::DefaultNoGrouping()); })
-		];
-
 	return VrrMenu::Card(LOCTEXT("TargetHeader", "Target"), VrrMenu::Rows({
-		VrrMenu::Row(LOCTEXT("TargetUVs", "Target UVs"), ChannelCombo,
+		VrrMenu::Row(LOCTEXT("TargetUVs", "Target UVs"), VrrMenu::UVChannelCombo([this]() { return NumUVChannels; }, &Settings.TargetChannel),
 			LOCTEXT("TargetUVsTip", "The channel the combined textures are laid out in. Every slot must have its own space in it (no overlapping islands), such as a channel from UV Layouts")),
-		VrrMenu::Row(LOCTEXT("Resolution", "Resolution"), ResolutionCombo,
+		VrrMenu::Row(LOCTEXT("Resolution", "Resolution"), VrrMenu::ResolutionCombo(&Settings.Resolution, { 512, 1024, 2048, 4096, 8192 }),
 			LOCTEXT("ResolutionTip", "Width and height of each texture")),
 		VrrMenu::Row(LOCTEXT("Padding", "Padding (px)"), VrrMenu::IntField(&Settings.Padding, 0, 64),
 			LOCTEXT("PaddingTip", "Grow each island by this many pixels so filtering and mips at the edges don't pick up empty texels")),
+		VrrMenu::Row(LOCTEXT("TextureSets", "Texture sets"),
+			VrrMenu::CheckBox(&Settings.bSplitByShadingModel, LOCTEXT("SplitByShadingModel", "One per shading model"),
+				LOCTEXT("SplitByShadingModelTip", "Group the slots by their material's shading model (Default Lit, Preintegrated Skin, Subsurface Profile...) and write one texture set per group, "
+					"named <base name>_<shading model>_<suffix>, for one material per shading model. "
+					"Slots only need their own space in the target UVs within their group; different groups may overlap"))),
 	}));
 }
 
@@ -212,17 +154,7 @@ void SMenu_ConsolidateMaterials::SetMesh(UObject* NewMesh)
 	Slots = Mesh.IsValid() ? MaterialConsolidator::GetSlots(Mesh.Get()) : TArray<FConsolidateSlot>();
 	StatusText = FText::GetEmpty();
 
-	ChannelOptions.Reset();
-	for (int32 Channel = 0; Channel < NumUVChannels; ++Channel)
-	{
-		ChannelOptions.Add(MakeShared<int32>(Channel));
-	}
 	Settings.TargetChannel = FMath::Min(1, FMath::Max(NumUVChannels - 1, 0));
-	if (TargetCombo.IsValid())
-	{
-		TargetCombo->RefreshOptions();
-		TargetCombo->SetSelectedItem(ChannelOptions.IsValidIndex(Settings.TargetChannel) ? ChannelOptions[Settings.TargetChannel] : nullptr);
-	}
 	if (Mesh.IsValid())
 	{
 		Settings.OutputFolder = FPackageName::GetLongPackagePath(Mesh->GetOutermost()->GetName());
@@ -280,6 +212,16 @@ void SMenu_ConsolidateMaterials::RefreshSlotList()
 			]
 			+ SHorizontalBox::Slot().AutoWidth()
 			[
+				SNew(SBox).WidthOverride(160.0f)
+				[
+					SNew(STextBlock)
+					.ColorAndOpacity(FSlateColor::UseSubduedForeground())
+					.Text(Slot.ShadingModelLabel)
+					.ToolTipText(LOCTEXT("SlotShadingModelTip", "The material's shading model. With one texture set per shading model, slots sharing it are combined"))
+				]
+			]
+			+ SHorizontalBox::Slot().AutoWidth()
+			[
 				SNew(STextBlock)
 				.ColorAndOpacity(FSlateColor::UseSubduedForeground())
 				.Text(FText::Format(LOCTEXT("SlotTriangles", "{0} triangles"), Slot.NumTriangles))
@@ -303,10 +245,9 @@ void SMenu_ConsolidateMaterials::RefreshResultPreviews()
 		{
 			continue;
 		}
+		// Each preview needs its own brush, kept alive (with its texture, see AddReferencedObjects) while it draws
 		TSharedPtr<FSlateBrush> Brush = MakeShared<FSlateBrush>();
-		Brush->DrawAs = ESlateBrushDrawType::Image;
-		Brush->SetResourceObject(Texture);
-		Brush->ImageSize = FVector2D(PreviewSize, PreviewSize);
+		VrrMenu::SetBrushTexture(*Brush, Texture);
 		ResultBrushes.Add(Brush);
 
 		ResultPreviews->AddSlot()
@@ -317,21 +258,7 @@ void SMenu_ConsolidateMaterials::RefreshResultPreviews()
 				SNew(SVerticalBox)
 				+ SVerticalBox::Slot().AutoHeight()
 				[
-					SNew(SBox)
-					.WidthOverride(PreviewSize)
-					.HeightOverride(PreviewSize)
-					[
-						SNew(SBorder)
-						.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
-						.BorderBackgroundColor(FLinearColor(0.012f, 0.012f, 0.014f, 1.0f))
-						.Padding(0.0f)
-						[
-							SNew(SScaleBox).Stretch(EStretch::ScaleToFit)
-							[
-								SNew(SImage).Image(Brush.Get())
-							]
-						]
-					]
+					VrrMenu::TexturePreview(Brush.Get(), PreviewSize, true)
 				]
 				+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f, 0.0f, 0.0f)
 				[
@@ -363,7 +290,7 @@ FText SMenu_ConsolidateMaterials::GetMeshInfoText() const
 		Slots.Num(), MeshDescription->Triangles().Num(), NumUVChannels);
 }
 
-/** "Writes /Game/Props/T_Crate_D, _M, _R, _N..." */
+/** "Writes /Game/Props/T_Crate_D, _M, _R, _N...", or one such line per shading model's texture set. */
 FText SMenu_ConsolidateMaterials::GetOutputNamesText() const
 {
 	if (Settings.OutputBaseName.IsEmpty() || !Settings.HasAnyMap())
@@ -378,9 +305,20 @@ FText SMenu_ConsolidateMaterials::GetOutputNamesText() const
 			Suffixes.Add(FString(TEXT("_")) + MaterialConsolidator::GetMapSuffix(static_cast<EConsolidateMap>(MapIndex)));
 		}
 	}
-	return FText::Format(LOCTEXT("OutputPath", "Writes {0}/{1}{2}"),
-		FText::FromString(VrrCore::NormalizeContentFolder(Settings.OutputFolder)), FText::FromString(Settings.OutputBaseName),
-		FText::FromString(FString::Join(Suffixes, TEXT(", "))));
+	const FString Folder = VrrCore::NormalizeContentFolder(Settings.OutputFolder);
+	const FString SuffixList = FString::Join(Suffixes, TEXT(", "));
+	if (!Settings.bSplitByShadingModel || Slots.IsEmpty())
+	{
+		return FText::Format(LOCTEXT("OutputPath", "Writes {0}/{1}{2}"),
+			FText::FromString(Folder), FText::FromString(Settings.OutputBaseName), FText::FromString(SuffixList));
+	}
+	TArray<FString> Lines;
+	for (const FConsolidateGroup& Group : MaterialConsolidator::GetGroups(Slots, Settings))
+	{
+		Lines.Add(FText::Format(LOCTEXT("OutputPathGroup", "{0} ({1} slots): writes {2}/{3}{4}"), Group.Label, Group.Slots.Num(),
+			FText::FromString(Folder), FText::FromString(MaterialConsolidator::GetGroupBaseName(Group, Settings)), FText::FromString(SuffixList)).ToString());
+	}
+	return FText::FromString(FString::Join(Lines, TEXT("\n")));
 }
 
 FText SMenu_ConsolidateMaterials::GetConsolidateBlocker() const
@@ -410,21 +348,6 @@ FText SMenu_ConsolidateMaterials::GetConsolidateBlocker() const
 		return LOCTEXT("NeedName", "Enter a base name for the textures.");
 	}
 	return FText::GetEmpty();
-}
-
-/** Picks the first Static or Skeletal Mesh selected in the Content Browser. */
-FReply SMenu_ConsolidateMaterials::OnUseSelectedMeshClicked()
-{
-	for (const FAssetData& Asset : VrrCore::GetSelectedAssets())
-	{
-		if (Asset.IsInstanceOf(UStaticMesh::StaticClass()) || Asset.IsInstanceOf(USkeletalMesh::StaticClass()))
-		{
-			SetMesh(Asset.GetAsset());
-			return FReply::Handled();
-		}
-	}
-	SetStatus(LOCTEXT("NoMeshSelected", "Select a Static Mesh or Skeletal Mesh in the Content Browser first."), true);
-	return FReply::Handled();
 }
 
 /** Consolidates, then previews the textures and selects them in the Content Browser. */

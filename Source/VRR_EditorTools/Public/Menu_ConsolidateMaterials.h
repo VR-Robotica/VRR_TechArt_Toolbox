@@ -9,7 +9,6 @@
 #include "UObject/GCObject.h"
 #include "Widgets/SCompoundWidget.h"
 
-template <typename OptionType> class SComboBox;
 class SVerticalBox;
 class SWrapBox;
 class UTexture2D;
@@ -41,11 +40,6 @@ private:
 
 	FConsolidateSettings Settings;
 
-	// Combo box options
-	TArray<TSharedPtr<int32>> ChannelOptions;
-	TSharedPtr<SComboBox<TSharedPtr<int32>>> TargetCombo;
-	TArray<TSharedPtr<int32>> ResolutionOptions;
-
 	/** The mesh's slots, rebuilt when the mesh changes. */
 	TSharedPtr<SVerticalBox> SlotList;
 
@@ -71,7 +65,6 @@ private:
 	FText GetOutputNamesText() const;
 	/** Why Consolidate can't run yet, or empty when it can. */
 	FText GetConsolidateBlocker() const;
-	FReply OnUseSelectedMeshClicked();
 	FReply OnConsolidateClicked();
 	void SetStatus(const FText& Text, bool bError);
 };

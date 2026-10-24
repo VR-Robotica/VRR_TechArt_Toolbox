@@ -48,7 +48,6 @@ private:
 	void RefreshBones();
 	/** How many body parts of the bone map are missing bones (the warning rows of Detected Bones). */
 	int32 CountToCheck() const;
-	FReply OnUseSelectionClicked();
 	FReply OnBrowseRigDescriptionClicked();
 	FReply OnGenerateClicked();
 	void SetStatus(const FText& Text, bool bError);

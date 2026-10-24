@@ -7,12 +7,20 @@
 #include "Framework/SlateDelegates.h"
 #include "Widgets/SWidget.h"
 
+struct FAssetData;
+struct FSlateBrush;
+class UTexture;
+
 /**
  * Widgets the Toolbox pages share, so every page looks and behaves the same.
  *
  * A page is a Stack of Cards. Each Card holds Rows: a fixed-width label column on the left and the field on the
  * right, so fields line up across every card and page. Help text and notes use one dimmed style, and each page
  * ends with an ActionButton (primary style, says why it's disabled) and a StatusLine.
+ *
+ * Fields edit a value through a pointer (a member of the page or its settings struct) and read it back through
+ * lambdas, so they always show the current value without the page pushing updates. The same goes for the
+ * shared pickers (MeshPicker, AssetPicker) and combos (UVChannelCombo, ResolutionCombo, IntCombo).
  */
 namespace VrrMenu
 {
@@ -99,6 +107,43 @@ namespace VrrMenu
 	 * Content Browser shows no real folder.
 	 */
 	TSharedRef<SWidget> FolderPicker(FString* Folder, const FString& DefaultFolder, TFunction<void(const FText&)> OnError, float Width = WideWidth);
+
+	/**
+	 * Combo over whole numbers that writes *Value. GetOptions is asked again each time the list opens, so options
+	 * that depend on the asset (a mesh's UV channels) never go stale; GetLabel names each one. OnChanged
+	 * (optional) runs after a pick, for follow-up updates such as a suggested name.
+	 */
+	TSharedRef<SWidget> IntCombo(TFunction<TArray<int32>()> GetOptions, int32* Value, TFunction<FText(int32)> GetLabel, TFunction<void(int32)> OnChanged = nullptr);
+
+	/** IntCombo over a mesh's UV channels ("UV0", "UV1"...). Shows nothing while GetNumChannels is 0 (no mesh). */
+	TSharedRef<SWidget> UVChannelCombo(TFunction<int32()> GetNumChannels, int32* Value, TFunction<void(int32)> OnChanged = nullptr);
+
+	/** IntCombo over texture sizes (width and height). */
+	TSharedRef<SWidget> ResolutionCombo(int32* Value, const TArray<int32>& Sizes = { 256, 512, 1024, 2048, 4096, 8192 });
+
+	// ASSETS
+
+	/**
+	 * Asset picker (at WideWidth, with thumbnail) plus a "Use Selected" button.
+	 * IsAllowed filters both the picker's list and the Content Browser selection the button takes;
+	 * GetAsset shows the current asset, and OnPicked gets the new one from either. When nothing selected passes,
+	 * OnError gets NothingSelectedError.
+	 */
+	TSharedRef<SWidget> AssetPicker(UClass* AllowedClass, TFunction<bool(const FAssetData&)> IsAllowed,
+		TFunction<UObject*()> GetAsset, TFunction<void(UObject*)> OnPicked,
+		const FText& UseSelectedToolTip, const FText& NothingSelectedError, TFunction<void(const FText&)> OnError);
+
+	/** Which meshes a MeshPicker accepts. */
+	enum class EMeshTypes : uint8 { StaticOrSkeletal, SkeletalOnly };
+
+	/** AssetPicker for the meshes the bakers take, with matching tooltips and errors. */
+	TSharedRef<SWidget> MeshPicker(EMeshTypes Types, TFunction<UObject*()> GetMesh, TFunction<void(UObject*)> OnPicked, TFunction<void(const FText&)> OnError);
+
+	/** Points a brush at a texture (or nothing) at the texture's own size, for TexturePreview. */
+	void SetBrushTexture(FSlateBrush& Brush, UTexture* Texture);
+
+	/** Dark square of Size showing Brush's texture (aspect kept), or "No texture" while HasTexture is false. */
+	TSharedRef<SWidget> TexturePreview(const FSlateBrush* Brush, float Size, const TAttribute<bool>& HasTexture);
 
 	// ACTIONS
 

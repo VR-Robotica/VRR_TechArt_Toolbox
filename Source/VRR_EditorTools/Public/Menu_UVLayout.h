@@ -30,15 +30,7 @@ private:
 
 	FUVLayoutSettings Settings;
 
-	// Combo box options
-	TArray<TSharedPtr<int32>> SourceOptions;
-	TSharedPtr<SComboBox<TSharedPtr<int32>>> SourceCombo;
-	TArray<TSharedPtr<int32>> TargetOptions;
-	TSharedPtr<SComboBox<TSharedPtr<int32>>> TargetCombo;
-	TSharedPtr<SComboBox<TSharedPtr<int32>>> BalancedTargetCombo;
-	TArray<TSharedPtr<int32>> ResolutionOptions;
-	TArray<TSharedPtr<int32>> BalancedResolutionOptions;
-	TArray<TSharedPtr<int32>> PackDetailOptions;
+	// Packing combo options (the int combos build their own, see VrrMenu::IntCombo)
 	TArray<TSharedPtr<EUVPackMethod>> PackMethodOptions;
 
 	/** One preview of LOD 0: the layout shown, the settings it was made with, and its widget. */
@@ -66,12 +58,12 @@ private:
 	TSharedRef<SWidget> CreateGeneralSection();
 	TSharedRef<SWidget> CreateBalancedSection();
 	TSharedRef<SWidget> CreateGroupedSection();
-	TSharedRef<SWidget> CreateChannelCombo(TSharedPtr<SComboBox<TSharedPtr<int32>>>& OutCombo, TArray<TSharedPtr<int32>>* Options, int32* Value, bool bTarget);
+	TSharedRef<SWidget> CreateChannelCombo(int32* Value, bool bTarget);
 
 	// Behavior
 	void SetMesh(UObject* NewMesh);
-	/** Rebuilds the channel combo options for the current mesh. */
-	void RefreshChannelOptions();
+	/** The channels a source or target combo offers for the current mesh. */
+	TArray<int32> GetChannelOptions(bool bTarget) const;
 	FText GetChannelLabel(int32 Channel, bool bTarget) const;
 	/** Why Apply can't run yet, or empty when it can. */
 	FText GetApplyBlocker() const;
@@ -83,7 +75,6 @@ private:
 	FUVLayoutSettings GetPreviewLayoutSettings(bool bBalanced) const;
 	void UpdatePreview(bool bBalanced);
 	void UpdatePreviews();
-	FReply OnUseSelectionClicked();
 	FReply OnApplyClicked();
 	/** Balanced padding/resolution defaults for its current use (lightmap or not). */
 	void ResetBalancedDefaults();

@@ -1,3 +1,13 @@
+// Fill out your copyright notice in the Description page of Project Settings.
+
+/*
+ * The plugin's UI commands (FVRR_EditorToolsCommands).
+ *
+ *  - CMD_OpenPopUpWindow is the one in use: the "Toolbox" toolbar/menu entry that opens the Toolbox tab
+ *    (mapped in FVRR_EditorTools::MapCommandListActions).
+ *  - CMD_CustomFunction_01-04 are template placeholders with no real behavior (01 is mapped to a test function,
+ *    02-04 only by FTAT_MenuBehaviors). Kept for now; remove them together with TAT_MenuBehaviors when unused.
+ */
 #include "VRR_EditorToolsCommands.h"
 
 

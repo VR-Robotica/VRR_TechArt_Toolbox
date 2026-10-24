@@ -20,7 +20,6 @@
 #include "MenuWidgets.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
-#include "PropertyCustomizationHelpers.h"
 #include "Subsystems/AssetEditorSubsystem.h"
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Input/SButton.h"
@@ -196,26 +195,10 @@ TSharedRef<SWidget> SMenu_ControlRig::CreateMeshSection()
 
 	return VrrMenu::HelpCard(LOCTEXT("MeshHeader", "Character"), LOCTEXT("MeshInfo", "Builds a Modular Control Rig from Epic's rig modules: Root, Spine, Neck, Shoulder, Arm (IK/FK), Leg (IK/FK), Foot and Finger, plus simple FK controls for face and other bones."), VrrMenu::Rows({
 		VrrMenu::Row(LOCTEXT("MeshLabel", "Skeletal mesh"),
-			SNew(SHorizontalBox)
-			+ SHorizontalBox::Slot().AutoWidth()
-			[
-				SNew(SBox)
-				.WidthOverride(VrrMenu::WideWidth)
-				[
-					SNew(SObjectPropertyEntryBox)
-					.AllowedClass(USkeletalMesh::StaticClass())
-					.ObjectPath_Lambda([this]() { return Mesh.IsValid() ? Mesh->GetPathName() : FString(); })
-					.OnObjectChanged_Lambda([this](const FAssetData& AssetData) { SetMesh(Cast<USkeletalMesh>(AssetData.GetAsset())); })
-					.DisplayThumbnail(true)
-				]
-			]
-			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(8.0f, 0.0f, 0.0f, 0.0f)
-			[
-				SNew(SButton)
-				.Text(LOCTEXT("UseSelection", "Use Selected"))
-				.ToolTipText(LOCTEXT("UseSelectionTip", "Use the skeletal mesh selected in the Content Browser"))
-				.OnClicked(this, &SMenu_ControlRig::OnUseSelectionClicked)
-			]),
+			VrrMenu::MeshPicker(VrrMenu::EMeshTypes::SkeletalOnly,
+				[this]() { return Mesh.Get(); },
+				[this](UObject* NewMesh) { SetMesh(Cast<USkeletalMesh>(NewMesh)); },
+				[this](const FText& Error) { SetStatus(Error, true); })),
 		VrrMenu::Row(LOCTEXT("RigDescription", "Blender rig"),
 			SNew(SHorizontalBox)
 			+ SHorizontalBox::Slot().AutoWidth()
@@ -493,22 +476,6 @@ FReply SMenu_ControlRig::OnBrowseRigDescriptionClicked()
 	{
 		SetRigDescription(FPaths::ConvertRelativePathToFull(Files[0]), false);
 	}
-	return FReply::Handled();
-}
-
-/** Picks the first Skeletal Mesh selected in the Content Browser. */
-FReply SMenu_ControlRig::OnUseSelectionClicked()
-{
-	for (const FAssetData& Asset : VrrCore::GetSelectedAssets())
-	{
-		if (Asset.IsInstanceOf(USkeletalMesh::StaticClass()))
-		{
-			SetMesh(Cast<USkeletalMesh>(Asset.GetAsset()));
-			return FReply::Handled();
-		}
-	}
-
-	SetStatus(LOCTEXT("NoMeshSelected", "Select a Skeletal Mesh in the Content Browser first."), true);
 	return FReply::Handled();
 }
 

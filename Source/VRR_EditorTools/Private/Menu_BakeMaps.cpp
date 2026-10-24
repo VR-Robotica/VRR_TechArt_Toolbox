@@ -10,32 +10,16 @@
 #include "Menu_BakeMaps.h"
 
 #include "Core_Common.h"
-#include "Engine/SkeletalMesh.h"
-#include "Engine/StaticMesh.h"
 #include "Engine/Texture2D.h"
 #include "MenuWidgets.h"
 #include "MeshDescription.h"
 #include "Misc/PackageName.h"
-#include "PropertyCustomizationHelpers.h"
-#include "Widgets/Input/SButton.h"
-#include "Widgets/Input/SComboBox.h"
-#include "Widgets/Input/SEditableTextBox.h"
-#include "Widgets/Input/SSpinBox.h"
-#include "Widgets/Layout/SBox.h"
-#include "Widgets/Layout/SSeparator.h"
-#include "Widgets/Text/STextBlock.h"
 
 #define LOCTEXT_NAMESPACE "SMenu_BakeMaps"
 
 /** Builds the page: mesh, one card per map, output and bake. */
 void SMenu_BakeMaps::Construct(const FArguments& InArgs)
 {
-	for (int32 Size : { 256, 512, 1024, 2048, 4096 })
-	{
-		ResolutionOptions.Add(MakeShared<int32>(Size));
-	}
-	Resolution = ResolutionOptions[3]; // 2048
-
 	ChildSlot
 	[
 		VrrMenu::Stack({
@@ -53,30 +37,10 @@ TSharedRef<SWidget> SMenu_BakeMaps::CreateMeshSection()
 {
 	return VrrMenu::Card(LOCTEXT("MeshHeader", "Source Mesh"), VrrMenu::Rows({
 		VrrMenu::Row(LOCTEXT("MeshLabel", "Mesh"),
-			SNew(SHorizontalBox)
-			+ SHorizontalBox::Slot().AutoWidth()
-			[
-				SNew(SBox)
-				.WidthOverride(VrrMenu::WideWidth)
-				[
-					SNew(SObjectPropertyEntryBox)
-					.AllowedClass(UStreamableRenderAsset::StaticClass())
-					.OnShouldFilterAsset_Lambda([](const FAssetData& AssetData)
-					{
-						return !AssetData.IsInstanceOf(UStaticMesh::StaticClass()) && !AssetData.IsInstanceOf(USkeletalMesh::StaticClass());
-					})
-					.ObjectPath_Lambda([this]() { return Mesh.IsValid() ? Mesh->GetPathName() : FString(); })
-					.OnObjectChanged_Lambda([this](const FAssetData& AssetData) { SetMesh(AssetData.GetAsset()); })
-					.DisplayThumbnail(true)
-				]
-			]
-			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(8.0f, 0.0f, 0.0f, 0.0f)
-			[
-				SNew(SButton)
-				.Text(LOCTEXT("UseSelection", "Use Selected"))
-				.ToolTipText(LOCTEXT("UseSelectionTip", "Use the static or skeletal mesh selected in the Content Browser"))
-				.OnClicked(this, &SMenu_BakeMaps::OnUseSelectionClicked)
-			]),
+			VrrMenu::MeshPicker(VrrMenu::EMeshTypes::StaticOrSkeletal,
+				[this]() { return Mesh.Get(); },
+				[this](UObject* NewMesh) { SetMesh(NewMesh); },
+				[this](const FText& Error) { SetStatus(Error, true); })),
 		VrrMenu::Note(TAttribute<FText>::CreateSP(this, &SMenu_BakeMaps::GetMeshInfoText)),
 		VrrMenu::Row(LOCTEXT("WeldDistance", "Weld distance (cm)"),
 			VrrMenu::FloatField(&Settings.WeldDistance, 0.0f, 10.0f, 0.001f),
@@ -167,40 +131,9 @@ TSharedRef<SWidget> SMenu_BakeMaps::CreateOutputSection()
 {
 	return VrrMenu::HelpCard(LOCTEXT("OutputHeader", "Output"), LOCTEXT("MapsInfo", "Maps are computed from the mesh's own LOD 0 geometry and saved as linear textures. Distances are in mesh units (cm)."), VrrMenu::Rows({
 		VrrMenu::Row(LOCTEXT("UVChannel", "UV channel"),
-			SAssignNew(UVChannelCombo, SComboBox<TSharedPtr<int32>>)
-			.OptionsSource(&UVChannelOptions)
-			.OnGenerateWidget_Lambda([](TSharedPtr<int32> Option)
-			{
-				return SNew(STextBlock).Text(FText::AsNumber(*Option));
-			})
-			.OnSelectionChanged_Lambda([this](TSharedPtr<int32> Option, ESelectInfo::Type)
-			{
-				if (Option.IsValid())
-				{
-					Settings.UVChannel = *Option;
-				}
-			})
-			[
-				SNew(STextBlock).Text_Lambda([this]() { return FText::AsNumber(Settings.UVChannel); })
-			]),
+			VrrMenu::UVChannelCombo([this]() { return NumUVChannels; }, &Settings.UVChannel)),
 		VrrMenu::Row(LOCTEXT("Resolution", "Resolution"),
-			SNew(SComboBox<TSharedPtr<int32>>)
-			.OptionsSource(&ResolutionOptions)
-			.InitiallySelectedItem(Resolution)
-			.OnGenerateWidget_Lambda([](TSharedPtr<int32> Option)
-			{
-				return SNew(STextBlock).Text(FText::AsNumber(*Option, &FNumberFormattingOptions::DefaultNoGrouping()));
-			})
-			.OnSelectionChanged_Lambda([this](TSharedPtr<int32> Option, ESelectInfo::Type)
-			{
-				if (Option.IsValid())
-				{
-					Resolution = Option;
-				}
-			})
-			[
-				SNew(STextBlock).Text_Lambda([this]() { return FText::AsNumber(*Resolution, &FNumberFormattingOptions::DefaultNoGrouping()); })
-			]),
+			VrrMenu::ResolutionCombo(&Settings.Resolution, { 256, 512, 1024, 2048, 4096 })),
 		VrrMenu::Row(LOCTEXT("Padding", "Padding (px)"),
 			VrrMenu::IntField(&Settings.Padding, 0, 64),
 			LOCTEXT("PaddingTip", "Grow each UV island by this many pixels so filtering and mips at the edges don't pick up empty texels")),
@@ -214,6 +147,24 @@ TSharedRef<SWidget> SMenu_BakeMaps::CreateOutputSection()
 				LOCTEXT("SplitTexturesTip", "Off: one packed mask with R = Curvature, G = Cavity, B = Edge. Without Ambient Occlusion it is RGB only (_CCE, smaller in memory); "
 					"with it, A = Ambient Occlusion and the name is _CCEA. Unchecked maps get their neutral value (0.5, white, black).\n"
 					"On: one linear grayscale texture per checked map (_Curvature, _Cavity, _Edge, _AO)"))),
+		VrrMenu::Row(LOCTEXT("TextureSets", "Texture sets"),
+			VrrMenu::CheckBox(&Settings.bSplitByShadingModel, LOCTEXT("SplitByShadingModel", "One per shading model"),
+				LOCTEXT("SplitByShadingModelTip", "For materials whose UVs overlap each other: group the material slots by shading model (Default Lit, Preintegrated Skin, Subsurface Profile...) "
+					"and bake one texture set per group, drawing only that group's triangles, named <Base name>_<shading model>_CCE...\n"
+					"The maps are still computed from the whole mesh, so other parts still occlude and curvature doesn't break at material borders"))),
+		VrrMenu::Note(TAttribute<FText>::CreateLambda([this]()
+		{
+			if (Settings.bSplitByShadingModel && !ShadingModelGroups.IsEmpty())
+			{
+				TArray<FString> Sets;
+				for (const FConsolidateGroup& Group : ShadingModelGroups)
+				{
+					Sets.Add(FString::Printf(TEXT("%s_%s (%s, %d slots)"), *Settings.OutputBaseName, *Group.Tag, *Group.Label.ToString(), Group.Slots.Num()));
+				}
+				return FText::Format(LOCTEXT("SetNames", "One set per shading model: {0}. Each gets the textures below."), FText::FromString(FString::Join(Sets, TEXT(", "))));
+			}
+			return FText::GetEmpty();
+		})),
 		VrrMenu::Note(TAttribute<FText>::CreateLambda([this]()
 		{
 			return Settings.bSplitTextures
@@ -248,6 +199,7 @@ void SMenu_BakeMaps::SetMesh(UObject* NewMesh)
 {
 	Mesh = VrrCore::IsStaticOrSkeletalMesh(NewMesh) ? NewMesh : nullptr;
 	NumUVChannels = 0;
+	ShadingModelGroups.Reset();
 	StatusText = FText::GetEmpty();
 
 	if (Mesh.IsValid())
@@ -255,19 +207,9 @@ void SMenu_BakeMaps::SetMesh(UObject* NewMesh)
 		NumUVChannels = VrrCore::GetNumUVChannels(Mesh.Get());
 		Settings.OutputFolder = FPackageName::GetLongPackagePath(Mesh->GetOutermost()->GetName());
 		Settings.OutputBaseName = MeshMapBaker::SuggestBaseName(Mesh.Get());
-	}
-
-	UVChannelOptions.Reset();
-	for (int32 Channel = 0; Channel < NumUVChannels; ++Channel)
-	{
-		UVChannelOptions.Add(MakeShared<int32>(Channel));
+		ShadingModelGroups = MaterialConsolidator::GroupByShadingModel(MaterialConsolidator::GetSlots(Mesh.Get()));
 	}
 	Settings.UVChannel = 0;
-	if (UVChannelCombo.IsValid())
-	{
-		UVChannelCombo->RefreshOptions();
-		UVChannelCombo->SetSelectedItem(UVChannelOptions.IsEmpty() ? nullptr : UVChannelOptions[0]);
-	}
 }
 
 /** Why Bake can't run yet (shown next to the button), or empty when it can. */
@@ -311,22 +253,6 @@ FText SMenu_BakeMaps::GetMeshInfoText() const
 		NumUVChannels);
 }
 
-/** Picks the first Static or Skeletal Mesh selected in the Content Browser. */
-FReply SMenu_BakeMaps::OnUseSelectionClicked()
-{
-	for (const FAssetData& Asset : VrrCore::GetSelectedAssets())
-	{
-		if (Asset.IsInstanceOf(UStaticMesh::StaticClass()) || Asset.IsInstanceOf(USkeletalMesh::StaticClass()))
-		{
-			SetMesh(Asset.GetAsset());
-			return FReply::Handled();
-		}
-	}
-
-	SetStatus(LOCTEXT("NoMeshSelected", "Select a Static Mesh or Skeletal Mesh in the Content Browser first."), true);
-	return FReply::Handled();
-}
-
 /** Bakes, then shows the result and selects the new textures in the Content Browser. */
 FReply SMenu_BakeMaps::OnBakeClicked()
 {
@@ -335,7 +261,6 @@ FReply SMenu_BakeMaps::OnBakeClicked()
 		return FReply::Handled();
 	}
 
-	Settings.Resolution = Resolution.IsValid() ? *Resolution : 2048;
 	const FMeshMapBakeResult Result = MeshMapBaker::Bake(Mesh.Get(), Settings);
 
 	SetStatus(Result.Message, !Result.bSuccess);

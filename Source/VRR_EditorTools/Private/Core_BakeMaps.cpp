@@ -17,19 +17,21 @@
  *  4. Trace AO for every covered texel (in parallel), then smooth it within connected surface.
  *  5. Pad the UV islands outward so filtering and mips at island borders don't pull in background.
  *  6. Write one packed mask (_CCE: R Curvature, G Cavity, B Edge; _CCEA adds A AO) or one grayscale texture per map.
+ *
+ * With Split by Shading Model, steps 3-6 run once per shading model of the mesh's materials, each drawing only the
+ * triangles of its slots: materials whose UVs overlap each other get separate textures (<Base>_DefaultLit_CCE...).
+ * The analysis (step 1-2) stays whole-mesh, so AO is still blocked by every part and curvature doesn't break at slot borders.
  */
 
 #include "Core_BakeMaps.h"
 
-#include "AssetRegistry/AssetRegistryModule.h"
 #include "Async/ParallelFor.h"
 #include "Core_Common.h"
+#include "Core_ConsolidateMaterials.h"
 #include "Engine/Texture2D.h"
 #include "MeshDescription.h"
-#include "Misc/PackageName.h"
 #include "Misc/ScopedSlowTask.h"
 #include "StaticMeshAttributes.h"
-#include "UObject/Package.h"
 
 #include <algorithm>
 
@@ -46,6 +48,7 @@ namespace BakeMapsImpl
 		TArray<FIntVector> Triangles;				// welded vertex indices, non-degenerate triangles only
 		TArray<FVertexInstanceID> Corners;			// 3 per triangle, for UV lookups
 		TArray<FVector3f> FaceNormals;				// per triangle
+		TArray<int32> PolygonGroups;				// per triangle: the mesh data's polygon group (material section)
 		TMap<uint64, TArray<int32, TInlineAllocator<2>>> EdgeTriangles;	// edge key -> triangles using it
 	};
 
@@ -151,6 +154,7 @@ namespace BakeMapsImpl
 			const int32 Triangle = Out.Triangles.Add(FIntVector(C[0], C[1], C[2]));
 			Out.Corners.Append({ Corners[0], Corners[1], Corners[2] });
 			Out.FaceNormals.Add(FaceNormal);
+			Out.PolygonGroups.Add(MeshDescription.GetTrianglePolygonGroup(TriangleID).GetValue());
 
 			for (int32 i = 0; i < 3; ++i)
 			{
@@ -636,7 +640,7 @@ namespace BakeMapsImpl
 		 * Creates (or with bOverwrite, updates) a linear texture. Pixels are G8 (one byte per texel) or, with bPacked, BGRA8; bWithAlpha keeps the alpha channel.
 		 * Returns null on failure.
 		 */
-		UTexture2D* WriteTexture(const FString& Suffix, int32 Size, const TArray<uint8>& Pixels, bool bPacked, bool bWithAlpha, FText& OutError) const;
+		UTexture2D* WriteTexture(const FString& BaseName, const FString& Suffix, int32 Size, const TArray<uint8>& Pixels, bool bPacked, bool bWithAlpha, FText& OutError) const;
 
 		/** Fills OutValues (one per texel) with AO for every texel a triangle covers. False if the user cancelled. */
 		bool TraceAmbientOcclusion(const FWeldedMesh& Welded, const FTriangleBVH& BVH, const TArray<int32>& Owner, const TArray<FVector2f>& Barycentrics,
@@ -645,39 +649,25 @@ namespace BakeMapsImpl
 
 	/**
 	 * Saves one baked map:
-	 *  1. with Overwrite on, reuse the existing texture of that name (materials keep their reference),
-	 *  2. otherwise create a new asset, skipping names that are taken,
-	 *  3. fill it with the pixels as linear data.
+	 *  1. get the texture asset (VrrCore::FindOrCreateTexture: with Overwrite on, the existing one of that name so
+	 *     materials keep their reference, otherwise a new asset at the first free name),
+	 *  2. fill it with the pixels as linear data.
 	 */
-	UTexture2D* FJob::WriteTexture(const FString& Suffix, int32 Size, const TArray<uint8>& Pixels, bool bPacked, bool bWithAlpha, FText& OutError) const
+	UTexture2D* FJob::WriteTexture(const FString& BaseName, const FString& Suffix, int32 Size, const TArray<uint8>& Pixels, bool bPacked, bool bWithAlpha, FText& OutError) const
 	{
-		const FString BaseAssetName = OutputBaseName + Suffix;
-		FString AssetName = BaseAssetName;
-		FString PackageName = OutputFolder / AssetName;
-		if (OutputBaseName.IsEmpty() || !FPackageName::IsValidLongPackageName(PackageName))
+		// 1. The asset (an empty base name would leave just the suffix, so reject it here)
+		if (OutputBaseName.IsEmpty())
 		{
-			OutError = FText::Format(LOCTEXT("BadTexturePath", "Invalid output path: {0}"), FText::FromString(PackageName));
+			OutError = LOCTEXT("NoBaseName", "Enter an output name first.");
+			return nullptr;
+		}
+		UTexture2D* Texture = VrrCore::FindOrCreateTexture(OutputFolder, BaseName + Suffix, bOverwrite, OutError);
+		if (!Texture)
+		{
 			return nullptr;
 		}
 
-		UTexture2D* Texture = nullptr;
-		if (bOverwrite && (FindPackage(nullptr, *PackageName) || FPackageName::DoesPackageExist(PackageName)))
-		{
-			Texture = LoadObject<UTexture2D>(nullptr, *(PackageName + TEXT(".") + AssetName), nullptr, LOAD_NoWarn | LOAD_Quiet);
-		}
-
-		if (!Texture)
-		{
-			// New asset; skip names taken (or held by something that isn't a texture)
-			for (int32 Index = 1; FindPackage(nullptr, *PackageName) || FPackageName::DoesPackageExist(PackageName); ++Index)
-			{
-				AssetName = FString::Printf(TEXT("%s_%02d"), *BaseAssetName, Index);
-				PackageName = OutputFolder / AssetName;
-			}
-			UPackage* Package = CreatePackage(*PackageName);
-			Texture = NewObject<UTexture2D>(Package, *AssetName, RF_Public | RF_Standalone | RF_Transactional);
-			FAssetRegistryModule::AssetCreated(Texture);
-		}
+		// 2. The pixels
 
 		Texture->Modify();
 		Texture->PreEditChange(nullptr);
@@ -864,10 +854,38 @@ namespace BakeMapsImpl
 		const float Background[NumMaps] = { 1.0f, 0.0f, 0.5f, 1.0f };
 		const TCHAR* Suffix[NumMaps] = { TEXT("_Cavity"), TEXT("_Edge"), TEXT("_Curvature"), TEXT("_AO") };
 
+		// The texture sets: one for the whole mesh, or one per shading model with the polygon groups (sections) it draws
+		struct FTextureSet
+		{
+			FString BaseName;
+			FText Label;
+			TSet<int32> PolygonGroups;
+			int32 NumConflicts = 0;
+		};
+		TArray<FTextureSet> Sets;
+		if (bSplitByShadingModel)
+		{
+			for (const FConsolidateGroup& Group : MaterialConsolidator::GroupByShadingModel(MaterialConsolidator::GetSlots(Mesh.Get())))
+			{
+				FTextureSet& Set = Sets.AddDefaulted_GetRef();
+				Set.BaseName = OutputBaseName + TEXT("_") + Group.Tag;
+				Set.Label = Group.Label;
+				for (const FConsolidateSlot& Slot : Group.Slots)
+				{
+					Set.PolygonGroups.Append(Slot.PolygonGroups);
+				}
+			}
+		}
+		if (Sets.IsEmpty())
+		{
+			Sets.AddDefaulted_GetRef().BaseName = OutputBaseName;
+		}
+		const bool bSplitSets = bSplitByShadingModel && !Sets[0].PolygonGroups.IsEmpty();
+
 		// Progress dialog with a Cancel button. AO is the slow part, so it gets most of the bar
 		constexpr float AOWork = 6.0f;
 		const FBakeTimer TotalTimer;
-		FScopedSlowTask SlowTask(5.0f + (bBakeAO ? AOWork : 0.0f), LOCTEXT("BakingMaps", "Baking mesh maps..."));
+		FScopedSlowTask SlowTask(1.0f + Sets.Num() * (4.0f + (bBakeAO ? AOWork : 0.0f)), LOCTEXT("BakingMaps", "Baking mesh maps..."));
 		SlowTask.MakeDialog(true);
 		const FText CancelledMessage = LOCTEXT("Cancelled", "Bake cancelled. No textures were changed.");
 
@@ -897,285 +915,256 @@ namespace BakeMapsImpl
 			BVH.Build(Welded);
 		}
 
-		// 2. Rasterize every triangle in UV space
-		SlowTask.EnterProgressFrame(2.0f, LOCTEXT("Rasterizing", "Rasterizing..."));
+		// Steps 2-5 per texture set; the whole mesh's analysis above is shared
 		const int32 Size = Resolution;
 		const int32 NumTexels = Size * Size;
-		TArray<float> Texels[NumMaps];
-		for (int32 Map = 0; Map < NumMaps; ++Map)
-		{
-			if (bMap[Map])
-			{
-				Texels[Map].Init(Background[Map], NumTexels);
-			}
-		}
-		TArray<int32> Owner;
-		// Which triangle last wrote each texel: marks filled texels and detects overlapping UVs
-		Owner.Init(INDEX_NONE, NumTexels);
-		int32 NumConflicts = 0;
-		int32 NumOutOfRange = 0;
-		const float SafeEdgeWidth = FMath::Max(EdgeWidth, 0.0001f);
-		TArray<int32> CandidateEdges;
-		// AO is traced after rasterizing, from the owning triangle and these barycentric weights (W0, W1)
-		TArray<FVector2f> Barycentrics;
-		if (bBakeAO)
-		{
-			Barycentrics.SetNumUninitialized(NumTexels);
-		}
-
-		// Progress (and Cancel) every 1% of the triangles
 		const int32 NumTriangles = Welded.Triangles.Num();
-		constexpr int32 RasterSteps = 100;
-		const int32 TrianglesPerStep = FMath::Max(FMath::DivideAndRoundUp(NumTriangles, RasterSteps), 1);
-		FScopedSlowTask RasterTask(static_cast<float>(FMath::DivideAndRoundUp(NumTriangles, TrianglesPerStep)), LOCTEXT("Rasterizing", "Rasterizing..."));
-		const FBakeTimer RasterTimer;
-
-		for (int32 Triangle = 0; Triangle < NumTriangles; ++Triangle)
+		int32 NumOutOfRange = 0;
+		TArray<FString> Names;
+		for (FTextureSet& Set : Sets)
 		{
-			if (Triangle % TrianglesPerStep == 0)
+			// 2. Rasterize every triangle of the set in UV space
+			SlowTask.EnterProgressFrame(2.0f, bSplitSets ? FText::Format(LOCTEXT("RasterizingSet", "{0}: rasterizing..."), Set.Label) : LOCTEXT("Rasterizing", "Rasterizing..."));
+			TArray<float> Texels[NumMaps];
+			for (int32 Map = 0; Map < NumMaps; ++Map)
 			{
-				if (RasterTask.ShouldCancel())
+				if (bMap[Map])
+				{
+					Texels[Map].Init(Background[Map], NumTexels);
+				}
+			}
+			TArray<int32> Owner;
+			// Which triangle last wrote each texel: marks filled texels and detects overlapping UVs
+			Owner.Init(INDEX_NONE, NumTexels);
+			int32& NumConflicts = Set.NumConflicts;
+			const float SafeEdgeWidth = FMath::Max(EdgeWidth, 0.0001f);
+			TArray<int32> CandidateEdges;
+			// AO is traced after rasterizing, from the owning triangle and these barycentric weights (W0, W1)
+			TArray<FVector2f> Barycentrics;
+			if (bBakeAO)
+			{
+				Barycentrics.SetNumUninitialized(NumTexels);
+			}
+
+			// Progress (and Cancel) every 1% of the triangles
+			constexpr int32 RasterSteps = 100;
+			const int32 TrianglesPerStep = FMath::Max(FMath::DivideAndRoundUp(NumTriangles, RasterSteps), 1);
+			FScopedSlowTask RasterTask(static_cast<float>(FMath::DivideAndRoundUp(NumTriangles, TrianglesPerStep)), LOCTEXT("Rasterizing", "Rasterizing..."));
+			const FBakeTimer RasterTimer;
+
+			for (int32 Triangle = 0; Triangle < NumTriangles; ++Triangle)
+			{
+				if (Triangle % TrianglesPerStep == 0)
+				{
+					if (RasterTask.ShouldCancel())
+					{
+						OutResult.Message = CancelledMessage;
+						return false;
+					}
+					RasterTask.EnterProgressFrame(1.0f, RasterTimer.Describe(LOCTEXT("RasterizingStep", "Rasterizing"), static_cast<float>(Triangle) / NumTriangles));
+				}
+				// Only the set's own triangles: another shading model's triangles may overlap these in UV space
+				if (bSplitSets && !Set.PolygonGroups.Contains(Welded.PolygonGroups[Triangle]))
+				{
+					continue;
+				}
+
+				const FIntVector& Tri = Welded.Triangles[Triangle];
+				const int32 C[3] = { Tri.X, Tri.Y, Tri.Z };
+
+				FVector2f Pixel[3];
+				bool bOutOfRange = false;
+				for (int32 i = 0; i < 3; ++i)
+				{
+					// UV corners in texel units
+					const FVector2f UV = UVs.Get(Welded.Corners[Triangle * 3 + i], UVChannel);
+					bOutOfRange |= UV.X < -0.001f || UV.X > 1.001f || UV.Y < -0.001f || UV.Y > 1.001f;
+					Pixel[i] = UV * static_cast<float>(Size);
+				}
+				NumOutOfRange += bOutOfRange ? 1 : 0;
+
+				const float Area = EdgeFunction(Pixel[0], Pixel[1], Pixel[2]);
+				if (FMath::Abs(Area) < UE_SMALL_NUMBER)
+				{
+					continue;
+				}
+
+				// Creases that can reach into this triangle: those touching any of its corners
+				CandidateEdges.Reset();
+				if (bBakeEdge)
+				{
+					for (int32 i = 0; i < 3; ++i)
+					{
+						for (const int32 SharpIndex : SharpEdgesOfVertex[C[i]])
+						{
+							CandidateEdges.AddUnique(SharpIndex);
+						}
+					}
+				}
+
+				const int32 MinX = FMath::Clamp(FMath::FloorToInt32(FMath::Min3(Pixel[0].X, Pixel[1].X, Pixel[2].X)), 0, Size - 1);
+				const int32 MaxX = FMath::Clamp(FMath::CeilToInt32(FMath::Max3(Pixel[0].X, Pixel[1].X, Pixel[2].X)), 0, Size - 1);
+				const int32 MinY = FMath::Clamp(FMath::FloorToInt32(FMath::Min3(Pixel[0].Y, Pixel[1].Y, Pixel[2].Y)), 0, Size - 1);
+				const int32 MaxY = FMath::Clamp(FMath::CeilToInt32(FMath::Max3(Pixel[0].Y, Pixel[1].Y, Pixel[2].Y)), 0, Size - 1);
+
+				for (int32 Y = MinY; Y <= MaxY; ++Y)
+				{
+					for (int32 X = MinX; X <= MaxX; ++X)
+					{
+						// Barycentric weights of the texel center; skip texels outside the triangle
+						const FVector2f Center(X + 0.5f, Y + 0.5f);
+						const float W0 = EdgeFunction(Pixel[1], Pixel[2], Center) / Area;
+						const float W1 = EdgeFunction(Pixel[2], Pixel[0], Center) / Area;
+						const float W2 = 1.0f - W0 - W1;
+						constexpr float Epsilon = -1e-4f;
+						if (W0 < Epsilon || W1 < Epsilon || W2 < Epsilon)
+						{
+							continue;
+						}
+
+						const int32 Index = Y * Size + X;
+
+						// Overlapping or mirrored UVs: an unconnected part of the mesh already wrote this texel
+						const int32 Previous = Owner[Index];
+						if (Previous != INDEX_NONE && Previous != Triangle)
+						{
+							const FIntVector& Other = Welded.Triangles[Previous];
+							bool bConnected = false;
+							for (int32 i = 0; i < 3; ++i)
+							{
+								bConnected |= C[i] == Other.X || C[i] == Other.Y || C[i] == Other.Z;
+							}
+							NumConflicts += bConnected ? 0 : 1;
+						}
+						Owner[Index] = Triangle;
+						if (bBakeAO)
+						{
+							Barycentrics[Index] = FVector2f(W0, W1);
+						}
+
+						// Vertex maps: blend the three corner values
+						for (const int32 Map : { Cavity, Curvature })
+						{
+							if (bMap[Map])
+							{
+								const TArray<float>& V = VertexValues[Map];
+								Texels[Map][Index] = V[C[0]] * W0 + V[C[1]] * W1 + V[C[2]] * W2;
+							}
+						}
+
+						// Edge map: distance from this texel's 3D position to the nearest crease, faded out over EdgeWidth
+						if (bBakeEdge)
+						{
+							const FVector3f Position = Welded.Positions[C[0]] * W0 + Welded.Positions[C[1]] * W1 + Welded.Positions[C[2]] * W2;
+							float Value = 0.0f;
+							for (const int32 SharpIndex : CandidateEdges)
+							{
+								const FSharpEdge& Sharp = SharpEdges[SharpIndex];
+								const float Distance = DistanceToSegment(Position, Sharp.A, Sharp.B);
+								Value = FMath::Max(Value, Sharp.Strength * (1.0f - FMath::SmoothStep(0.0f, SafeEdgeWidth, Distance)));
+							}
+							Texels[Edge][Index] = Value;
+						}
+					}
+				}
+			}
+
+			// 3. Ambient occlusion per covered texel
+			if (bBakeAO)
+			{
+				SlowTask.EnterProgressFrame(AOWork, LOCTEXT("TracingAO", "Tracing ambient occlusion..."));
+				if (!TraceAmbientOcclusion(Welded, BVH, Owner, Barycentrics, Size, Texels[AmbientOcclusion]))
 				{
 					OutResult.Message = CancelledMessage;
 					return false;
 				}
-				RasterTask.EnterProgressFrame(1.0f, RasterTimer.Describe(LOCTEXT("RasterizingStep", "Rasterizing"), static_cast<float>(Triangle) / NumTriangles));
 			}
-
-			const FIntVector& Tri = Welded.Triangles[Triangle];
-			const int32 C[3] = { Tri.X, Tri.Y, Tri.Z };
-
-			FVector2f Pixel[3];
-			bool bOutOfRange = false;
-			for (int32 i = 0; i < 3; ++i)
-			{
-				// UV corners in texel units
-				const FVector2f UV = UVs.Get(Welded.Corners[Triangle * 3 + i], UVChannel);
-				bOutOfRange |= UV.X < -0.001f || UV.X > 1.001f || UV.Y < -0.001f || UV.Y > 1.001f;
-				Pixel[i] = UV * static_cast<float>(Size);
-			}
-			NumOutOfRange += bOutOfRange ? 1 : 0;
-
-			const float Area = EdgeFunction(Pixel[0], Pixel[1], Pixel[2]);
-			if (FMath::Abs(Area) < UE_SMALL_NUMBER)
-			{
-				continue;
-			}
-
-			// Creases that can reach into this triangle: those touching any of its corners
-			CandidateEdges.Reset();
-			if (bBakeEdge)
-			{
-				for (int32 i = 0; i < 3; ++i)
-				{
-					for (const int32 SharpIndex : SharpEdgesOfVertex[C[i]])
-					{
-						CandidateEdges.AddUnique(SharpIndex);
-					}
-				}
-			}
-
-			const int32 MinX = FMath::Clamp(FMath::FloorToInt32(FMath::Min3(Pixel[0].X, Pixel[1].X, Pixel[2].X)), 0, Size - 1);
-			const int32 MaxX = FMath::Clamp(FMath::CeilToInt32(FMath::Max3(Pixel[0].X, Pixel[1].X, Pixel[2].X)), 0, Size - 1);
-			const int32 MinY = FMath::Clamp(FMath::FloorToInt32(FMath::Min3(Pixel[0].Y, Pixel[1].Y, Pixel[2].Y)), 0, Size - 1);
-			const int32 MaxY = FMath::Clamp(FMath::CeilToInt32(FMath::Max3(Pixel[0].Y, Pixel[1].Y, Pixel[2].Y)), 0, Size - 1);
-
-			for (int32 Y = MinY; Y <= MaxY; ++Y)
-			{
-				for (int32 X = MinX; X <= MaxX; ++X)
-				{
-					// Barycentric weights of the texel center; skip texels outside the triangle
-					const FVector2f Center(X + 0.5f, Y + 0.5f);
-					const float W0 = EdgeFunction(Pixel[1], Pixel[2], Center) / Area;
-					const float W1 = EdgeFunction(Pixel[2], Pixel[0], Center) / Area;
-					const float W2 = 1.0f - W0 - W1;
-					constexpr float Epsilon = -1e-4f;
-					if (W0 < Epsilon || W1 < Epsilon || W2 < Epsilon)
-					{
-						continue;
-					}
-
-					const int32 Index = Y * Size + X;
-
-					// Overlapping or mirrored UVs: an unconnected part of the mesh already wrote this texel
-					const int32 Previous = Owner[Index];
-					if (Previous != INDEX_NONE && Previous != Triangle)
-					{
-						const FIntVector& Other = Welded.Triangles[Previous];
-						bool bConnected = false;
-						for (int32 i = 0; i < 3; ++i)
-						{
-							bConnected |= C[i] == Other.X || C[i] == Other.Y || C[i] == Other.Z;
-						}
-						NumConflicts += bConnected ? 0 : 1;
-					}
-					Owner[Index] = Triangle;
-					if (bBakeAO)
-					{
-						Barycentrics[Index] = FVector2f(W0, W1);
-					}
-
-					// Vertex maps: blend the three corner values
-					for (const int32 Map : { Cavity, Curvature })
-					{
-						if (bMap[Map])
-						{
-							const TArray<float>& V = VertexValues[Map];
-							Texels[Map][Index] = V[C[0]] * W0 + V[C[1]] * W1 + V[C[2]] * W2;
-						}
-					}
-
-					// Edge map: distance from this texel's 3D position to the nearest crease, faded out over EdgeWidth
-					if (bBakeEdge)
-					{
-						const FVector3f Position = Welded.Positions[C[0]] * W0 + Welded.Positions[C[1]] * W1 + Welded.Positions[C[2]] * W2;
-						float Value = 0.0f;
-						for (const int32 SharpIndex : CandidateEdges)
-						{
-							const FSharpEdge& Sharp = SharpEdges[SharpIndex];
-							const float Distance = DistanceToSegment(Position, Sharp.A, Sharp.B);
-							Value = FMath::Max(Value, Sharp.Strength * (1.0f - FMath::SmoothStep(0.0f, SafeEdgeWidth, Distance)));
-						}
-						Texels[Edge][Index] = Value;
-					}
-				}
-			}
-		}
-
-		// 3. Ambient occlusion per covered texel
-		if (bBakeAO)
-		{
-			SlowTask.EnterProgressFrame(AOWork, LOCTEXT("TracingAO", "Tracing ambient occlusion..."));
-			if (!TraceAmbientOcclusion(Welded, BVH, Owner, Barycentrics, Size, Texels[AmbientOcclusion]))
+			if (SlowTask.ShouldCancel())
 			{
 				OutResult.Message = CancelledMessage;
 				return false;
 			}
-		}
-		if (SlowTask.ShouldCancel())
-		{
-			OutResult.Message = CancelledMessage;
-			return false;
-		}
 
-		// 4. Pad the islands so filtering and mips at their edges stay on valid data
-		SlowTask.EnterProgressFrame(1.0f, LOCTEXT("Padding", "Padding islands..."));
-		TBitArray<> Filled(false, NumTexels);
-		for (int32 Index = 0; Index < NumTexels; ++Index)
-		{
-			Filled[Index] = Owner[Index] != INDEX_NONE;
-		}
-		// Each pass fills empty texels next to filled ones with their average, growing the islands by one texel
-		TArray<int32> NewlyFilled;
-		for (int32 Pass = 0; Pass < Padding; ++Pass)
-		{
-			NewlyFilled.Reset();
-			for (int32 Y = 0; Y < Size; ++Y)
+			// 4. Pad the islands so filtering and mips at their edges stay on valid data
+			SlowTask.EnterProgressFrame(1.0f, LOCTEXT("Padding", "Padding islands..."));
+			TBitArray<> Filled(false, NumTexels);
+			for (int32 Index = 0; Index < NumTexels; ++Index)
 			{
-				for (int32 X = 0; X < Size; ++X)
+				Filled[Index] = Owner[Index] != INDEX_NONE;
+			}
+			// Each pass fills empty texels next to filled ones with the average of those neighbors, growing the islands
+			// by one texel. Every baked map is filled from the same neighbors, so the maps stay aligned.
+			VrrCore::PadIslands(Size, Padding, Filled, [&](int32 Index, TConstArrayView<int32> Neighbors)
+			{
+				for (int32 Map = 0; Map < NumMaps; ++Map)
 				{
-					const int32 Index = Y * Size + X;
-					if (Filled[Index])
+					if (bMap[Map])
+					{
+						float Sum = 0.0f;
+						for (const int32 Neighbor : Neighbors)
+						{
+							Sum += Texels[Map][Neighbor];
+						}
+						Texels[Map][Index] = Sum / Neighbors.Num();
+					}
+				}
+			});
+
+			// 5. Write the textures
+			SlowTask.EnterProgressFrame(1.0f, LOCTEXT("CreatingTextures", "Creating textures..."));
+			TArray<uint8> Pixels;
+
+			auto Write = [&](const FString& TextureSuffix, bool bPacked, bool bWithAlpha) -> bool
+			{
+				FText Error;
+				UTexture2D* Texture = WriteTexture(Set.BaseName, TextureSuffix, Size, Pixels, bPacked, bWithAlpha, Error);
+				if (!Texture)
+				{
+					OutResult.Message = Error;
+					return false;
+				}
+				OutResult.Textures.Add(Texture);
+				Names.Add(Texture->GetName());
+				return true;
+			};
+
+			// Unchecked maps get their neutral value in the packed texture
+			auto TexelValue = [&](int32 Map, int32 Index) { return bMap[Map] ? Texels[Map][Index] : Background[Map]; };
+
+			if (!bSplitTextures)
+			{
+				// One mask: R Curvature, G Cavity, B Edge (BGRA byte order). With AO: A Ambient Occlusion and the name _CCEA;
+				// without it the alpha is dropped (_CCE, compressed as RGB-only) to keep memory down
+				Pixels.SetNumUninitialized(NumTexels * 4);
+				for (int32 Index = 0; Index < NumTexels; ++Index)
+				{
+					Pixels[Index * 4 + 0] = ToByte(TexelValue(Edge, Index));
+					Pixels[Index * 4 + 1] = ToByte(TexelValue(Cavity, Index));
+					Pixels[Index * 4 + 2] = ToByte(TexelValue(Curvature, Index));
+					Pixels[Index * 4 + 3] = bBakeAO ? ToByte(Texels[AmbientOcclusion][Index]) : 255;
+				}
+				if (!Write(MeshMapBaker::PackedSuffix(bBakeAO), true, bBakeAO))
+				{
+					return false;
+				}
+			}
+			else
+			{
+				for (int32 Map = 0; Map < NumMaps; ++Map)
+				{
+					if (!bMap[Map])
 					{
 						continue;
 					}
-
-					float Sum[NumMaps] = {};
-					int32 Count = 0;
-					for (int32 DY = -1; DY <= 1; ++DY)
+					Pixels.SetNumUninitialized(NumTexels);
+					for (int32 Index = 0; Index < NumTexels; ++Index)
 					{
-						for (int32 DX = -1; DX <= 1; ++DX)
-						{
-							const int32 NX = X + DX;
-							const int32 NY = Y + DY;
-							if ((DX || DY) && NX >= 0 && NX < Size && NY >= 0 && NY < Size && Filled[NY * Size + NX])
-							{
-								for (int32 Map = 0; Map < NumMaps; ++Map)
-								{
-									Sum[Map] += bMap[Map] ? Texels[Map][NY * Size + NX] : 0.0f;
-								}
-								++Count;
-							}
-						}
+						Pixels[Index] = ToByte(Texels[Map][Index]);
 					}
-					if (Count > 0)
+					if (!Write(Suffix[Map], false, false))
 					{
-						for (int32 Map = 0; Map < NumMaps; ++Map)
-						{
-							if (bMap[Map])
-							{
-								Texels[Map][Index] = Sum[Map] / Count;
-							}
-						}
-						NewlyFilled.Add(Index);
+						return false;
 					}
-				}
-			}
-			if (NewlyFilled.IsEmpty())
-			{
-				break;
-			}
-			for (const int32 Index : NewlyFilled)
-			{
-				Filled[Index] = true;
-			}
-		}
-
-		// 5. Write the textures
-		SlowTask.EnterProgressFrame(1.0f, LOCTEXT("CreatingTextures", "Creating textures..."));
-		TArray<FString> Names;
-		TArray<uint8> Pixels;
-
-		auto Write = [&](const FString& TextureSuffix, bool bPacked, bool bWithAlpha) -> bool
-		{
-			FText Error;
-			UTexture2D* Texture = WriteTexture(TextureSuffix, Size, Pixels, bPacked, bWithAlpha, Error);
-			if (!Texture)
-			{
-				OutResult.Message = Error;
-				return false;
-			}
-			OutResult.Textures.Add(Texture);
-			Names.Add(Texture->GetName());
-			return true;
-		};
-
-		// Unchecked maps get their neutral value in the packed texture
-		auto TexelValue = [&](int32 Map, int32 Index) { return bMap[Map] ? Texels[Map][Index] : Background[Map]; };
-
-		if (!bSplitTextures)
-		{
-			// One mask: R Curvature, G Cavity, B Edge (BGRA byte order). With AO: A Ambient Occlusion and the name _CCEA;
-			// without it the alpha is dropped (_CCE, compressed as RGB-only) to keep memory down
-			Pixels.SetNumUninitialized(NumTexels * 4);
-			for (int32 Index = 0; Index < NumTexels; ++Index)
-			{
-				Pixels[Index * 4 + 0] = ToByte(TexelValue(Edge, Index));
-				Pixels[Index * 4 + 1] = ToByte(TexelValue(Cavity, Index));
-				Pixels[Index * 4 + 2] = ToByte(TexelValue(Curvature, Index));
-				Pixels[Index * 4 + 3] = bBakeAO ? ToByte(Texels[AmbientOcclusion][Index]) : 255;
-			}
-			if (!Write(MeshMapBaker::PackedSuffix(bBakeAO), true, bBakeAO))
-			{
-				return false;
-			}
-		}
-		else
-		{
-			for (int32 Map = 0; Map < NumMaps; ++Map)
-			{
-				if (!bMap[Map])
-				{
-					continue;
-				}
-				Pixels.SetNumUninitialized(NumTexels);
-				for (int32 Index = 0; Index < NumTexels; ++Index)
-				{
-					Pixels[Index] = ToByte(Texels[Map][Index]);
-				}
-				if (!Write(Suffix[Map], false, false))
-				{
-					return false;
 				}
 			}
 		}
@@ -1187,10 +1176,25 @@ namespace BakeMapsImpl
 		{
 			Message = FText::Format(LOCTEXT("NoEdges", "{0} No creases reached the start angle, so the edge map is black."), Message);
 		}
-		if (NumConflicts > 0)
+		if (bSplitSets)
 		{
-			Message = FText::Format(LOCTEXT("ConflictNote", "{0} Warning: {1} texels are shared by separate parts of the mesh (overlapping or mirrored UVs); those areas mix values. Use a UV channel with unique UVs."),
-				Message, NumConflicts);
+			TArray<FString> Labels;
+			for (const FTextureSet& Set : Sets)
+			{
+				Labels.Add(Set.Label.ToString());
+			}
+			Message = FText::Format(LOCTEXT("SetsNote", "{0} One texture set per shading model: {1}."), Message, FText::FromString(FString::Join(Labels, TEXT(", "))));
+		}
+		for (const FTextureSet& Set : Sets)
+		{
+			if (Set.NumConflicts > 0)
+			{
+				Message = bSplitSets
+					? FText::Format(LOCTEXT("ConflictNoteSet", "{0} Warning ({1}): {2} texels are shared by separate parts of its materials (overlapping or mirrored UVs); those areas mix values."),
+						Message, Set.Label, Set.NumConflicts)
+					: FText::Format(LOCTEXT("ConflictNote", "{0} Warning: {1} texels are shared by separate parts of the mesh (overlapping or mirrored UVs); those areas mix values. Use a UV channel with unique UVs, or one texture set per shading model if the overlap is between materials."),
+						Message, Set.NumConflicts);
+			}
 		}
 		if (NumOutOfRange > 0)
 		{

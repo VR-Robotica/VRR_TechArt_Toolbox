@@ -111,33 +111,17 @@ void SMenu_VATBake::Construct(const FArguments& InArgs)
 
 // LAYOUT
 
-/** Skeletal mesh picker, "Use Selected", and a line with its skeleton, bones and vertices. */
+/** Skeletal mesh picker (with "Use Selected"), and a line with its skeleton, bones and vertices. */
 TSharedRef<SWidget> SMenu_VATBake::CreateMeshSection()
 {
 	return VrrMenu::HelpCard(LOCTEXT("MeshHeader", "Skeletal Mesh"),
 		LOCTEXT("MeshHelp", "Builds the Data Asset that Unreal's AnimToTexture plugin bakes Vertex Animation Textures from. The skeletal mesh is the source the animations are played on."),
 		VrrMenu::Rows({
 			VrrMenu::Row(LOCTEXT("MeshLabel", "Skeletal mesh"),
-				SNew(SHorizontalBox)
-				+ SHorizontalBox::Slot().AutoWidth()
-				[
-					SNew(SBox)
-					.WidthOverride(VrrMenu::WideWidth)
-					[
-						SNew(SObjectPropertyEntryBox)
-						.AllowedClass(USkeletalMesh::StaticClass())
-						.ObjectPath_Lambda([this]() { return Mesh.IsValid() ? Mesh->GetPathName() : FString(); })
-						.OnObjectChanged_Lambda([this](const FAssetData& AssetData) { SetMesh(Cast<USkeletalMesh>(AssetData.GetAsset())); })
-						.DisplayThumbnail(true)
-					]
-				]
-				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(8.0f, 0.0f, 0.0f, 0.0f)
-				[
-					SNew(SButton)
-					.Text(LOCTEXT("UseSelected", "Use Selected"))
-					.ToolTipText(LOCTEXT("UseSelectedMeshTip", "Use the skeletal mesh selected in the Content Browser"))
-					.OnClicked(this, &SMenu_VATBake::OnUseSelectedMeshClicked)
-				]),
+				VrrMenu::MeshPicker(VrrMenu::EMeshTypes::SkeletalOnly,
+					[this]() { return Mesh.Get(); },
+					[this](UObject* NewMesh) { SetMesh(Cast<USkeletalMesh>(NewMesh)); },
+					[this](const FText& Error) { SetStatus(Error, true); })),
 			VrrMenu::Note(TAttribute<FText>::CreateSP(this, &SMenu_VATBake::GetMeshInfo)),
 		}));
 }
@@ -749,22 +733,6 @@ FText SMenu_VATBake::GetCreatedSetInfo() const
 	const FText MeshName = CreatedSet.SkeletalMesh.IsValid() ? FText::FromString(CreatedSet.SkeletalMesh->GetName()) : LOCTEXT("MissingMesh", "(missing mesh)");
 	return FText::Format(LOCTEXT("SetInfo", "Bake VAT uses DA_{0}_LOD0-{1} in {2} ({3}). Animations and settings are read from those Data Assets."),
 		FText::FromString(CreatedSet.BaseName), CreatedSet.DataAssets.Num() - 1, FText::FromString(CreatedSet.Folder), MeshName);
-}
-
-/** Picks the first Skeletal Mesh selected in the Content Browser. */
-FReply SMenu_VATBake::OnUseSelectedMeshClicked()
-{
-	for (const FAssetData& Asset : VrrCore::GetSelectedAssets())
-	{
-		if (Asset.IsInstanceOf(USkeletalMesh::StaticClass()))
-		{
-			SetMesh(Cast<USkeletalMesh>(Asset.GetAsset()));
-			return FReply::Handled();
-		}
-	}
-
-	SetStatus(LOCTEXT("NoMeshSelected", "Select a Skeletal Mesh in the Content Browser first."), true);
-	return FReply::Handled();
 }
 
 /** Ticks every listed animation that is selected in the Content Browser; reports the ones this skeleton can't use. */

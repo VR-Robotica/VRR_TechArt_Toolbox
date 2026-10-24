@@ -13,29 +13,29 @@
  *  4. Outputs that are one value everywhere (no metallic, no emissive...) can be skipped.
  *  5. The islands are padded outward, the rest filled with the average (a flat normal for normals),
  *     and each output is written as its own texture (<Base>_D, _N, _R...).
+ *
+ * With Split by Shading Model, the slots are grouped by their material's shading model and steps 2-5 run once
+ * per group, so each shading model gets its own texture set (<Base>_DefaultLit_D, <Base>_PreintegratedSkin_D...).
  */
 
 #include "Core_ConsolidateMaterials.h"
 
-#include "AssetRegistry/AssetRegistryModule.h"
 #include "Core_Common.h"
 #include "Engine/SkeletalMesh.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture2D.h"
-#include "FileHelpers.h"
 #include "IMaterialBakingModule.h"
 #include "ImageCore.h"
 #include "MaterialBakingStructures.h"
 #include "Materials/Material.h"
 #include "MeshDescription.h"
 #include "MeshElementRemappings.h"
-#include "Misc/PackageName.h"
 #include "Misc/ScopeExit.h"
 #include "Misc/ScopedSlowTask.h"
 #include "Modules/ModuleManager.h"
+#include "Engine/SubsurfaceProfile.h"
 #include "StaticMeshAttributes.h"
 #include "StaticMeshOperations.h"
-#include "UObject/Package.h"
 
 #define LOCTEXT_NAMESPACE "MaterialConsolidator"
 
@@ -116,8 +116,8 @@ namespace ConsolidateImpl
 	}
 
 	/**
-	 * Grows the covered islands by Passes texels (each pass fills empty texels next to filled ones with their average),
-	 * then fills the rest with Fill, or the average of the covered texels when Fill is unset.
+	 * Grows the covered islands by Passes texels (VrrCore::PadIslands: each pass fills empty texels next to filled
+	 * ones with their average), then fills the rest with Fill, or the average of the covered texels when Fill is unset.
 	 */
 	template <typename PixelType>
 	void Pad(TArray<PixelType>& Pixels, TBitArray<> Filled, int32 Size, int32 Passes, const TOptional<PixelType>& Fill)
@@ -142,50 +142,18 @@ namespace ConsolidateImpl
 			FromRaw(NumFilled > 0 ? Mean / static_cast<float>(NumFilled) : FLinearColor::Transparent, Rest);
 		}
 
-		TArray<int32> NewlyFilled;
-		for (int32 Pass = 0; Pass < Passes; ++Pass)
+		// Grow the islands (Filled is this function's own copy, so the canvas keeps its coverage)
+		VrrCore::PadIslands(Size, Passes, Filled, [&Pixels](int32 Index, TConstArrayView<int32> Neighbors)
 		{
-			NewlyFilled.Reset();
-			for (int32 Y = 0; Y < Size; ++Y)
+			FLinearColor Total = FLinearColor::Transparent;
+			for (const int32 Neighbor : Neighbors)
 			{
-				for (int32 X = 0; X < Size; ++X)
-				{
-					const int32 Index = Y * Size + X;
-					if (Filled[Index])
-					{
-						continue;
-					}
-					FLinearColor Total = FLinearColor::Transparent;
-					int32 Count = 0;
-					for (int32 DY = -1; DY <= 1; ++DY)
-					{
-						for (int32 DX = -1; DX <= 1; ++DX)
-						{
-							const int32 NX = X + DX;
-							const int32 NY = Y + DY;
-							if ((DX || DY) && NX >= 0 && NX < Size && NY >= 0 && NY < Size && Filled[NY * Size + NX])
-							{
-								Total += ToRaw(Pixels[NY * Size + NX]);
-								++Count;
-							}
-						}
-					}
-					if (Count > 0)
-					{
-						FromRaw(Total / static_cast<float>(Count), Pixels[Index]);
-						NewlyFilled.Add(Index);
-					}
-				}
+				Total += ToRaw(Pixels[Neighbor]);
 			}
-			if (NewlyFilled.IsEmpty())
-			{
-				break;
-			}
-			for (const int32 Index : NewlyFilled)
-			{
-				Filled[Index] = true;
-			}
-		}
+			FromRaw(Total / static_cast<float>(Neighbors.Num()), Pixels[Index]);
+		});
+
+		// Everything still empty gets the fill value
 		for (int32 Index = 0; Index < Pixels.Num(); ++Index)
 		{
 			if (!Filled[Index])
@@ -211,40 +179,11 @@ namespace ConsolidateImpl
 		return FString::Printf(TEXT("#%02X%02X%02X"), Bytes.R, Bytes.G, Bytes.B);
 	}
 
-	/** The texture to write: with Overwrite on, the existing one of that name (materials keep their reference), otherwise a new one. */
-	UTexture2D* FindOrCreateTexture(const FString& Folder, const FString& Name, bool bOverwrite, FText& OutError)
-	{
-		FString AssetName = Name;
-		FString PackageName = Folder / AssetName;
-		if (Name.IsEmpty() || !FPackageName::IsValidLongPackageName(PackageName))
-		{
-			OutError = FText::Format(LOCTEXT("BadPath", "Invalid output path: {0}"), FText::FromString(PackageName));
-			return nullptr;
-		}
-
-		UTexture2D* Texture = nullptr;
-		if (bOverwrite && (FindPackage(nullptr, *PackageName) || FPackageName::DoesPackageExist(PackageName)))
-		{
-			Texture = LoadObject<UTexture2D>(nullptr, *(PackageName + TEXT(".") + AssetName), nullptr, LOAD_NoWarn | LOAD_Quiet);
-		}
-		if (!Texture)
-		{
-			for (int32 Index = 1; FindPackage(nullptr, *PackageName) || FPackageName::DoesPackageExist(PackageName); ++Index)
-			{
-				AssetName = FString::Printf(TEXT("%s_%02d"), *Name, Index);
-				PackageName = Folder / AssetName;
-			}
-			UPackage* Package = CreatePackage(*PackageName);
-			Texture = NewObject<UTexture2D>(Package, *AssetName, RF_Public | RF_Standalone | RF_Transactional);
-			FAssetRegistryModule::AssetCreated(Texture);
-		}
-		return Texture;
-	}
-
 	/** Writes a finished canvas into a texture with the settings its kind of data needs. */
 	UTexture2D* WriteTexture(EConsolidateMap Map, const FMapCanvas& Canvas, const FString& Folder, const FString& Name, bool bOverwrite, FText& OutError)
 	{
-		UTexture2D* Texture = FindOrCreateTexture(Folder, Name, bOverwrite, OutError);
+		// With Overwrite on, the existing texture of that name (materials keep their reference), otherwise a new one
+		UTexture2D* Texture = VrrCore::FindOrCreateTexture(Folder, Name, bOverwrite, OutError);
 		if (!Texture)
 		{
 			return nullptr;
@@ -311,6 +250,58 @@ namespace ConsolidateImpl
 		Texture->MarkPackageDirty();
 		return Texture;
 	}
+
+	/** The material's shading model(s): "PreintegratedSkin" / "Preintegrated Skin". Several (from a material expression) are joined. */
+	void GetShadingModelInfo(const UMaterialInterface* Material, FString& OutTag, FText& OutLabel)
+	{
+		const UMaterialInterface* Used = Material ? Material : UMaterial::GetDefaultMaterial(MD_Surface);
+		const FMaterialShadingModelField Field = Used ? Used->GetShadingModels() : FMaterialShadingModelField(MSM_DefaultLit);
+		const UEnum* Enum = StaticEnum<EMaterialShadingModel>();
+		TArray<FString> Tags;
+		TArray<FString> Labels;
+		for (int32 Model = 0; Model < MSM_NUM; ++Model)
+		{
+			if (Field.HasShadingModel(static_cast<EMaterialShadingModel>(Model)))
+			{
+				const FString Label = Enum->GetDisplayNameTextByValue(Model).ToString();
+				Labels.Add(Label);
+				Tags.Add(Label.Replace(TEXT(" "), TEXT("")));
+			}
+		}
+		if (Tags.IsEmpty())
+		{
+			OutTag = TEXT("Unknown");
+			OutLabel = LOCTEXT("UnknownShadingModel", "Unknown");
+			return;
+		}
+		OutTag = FString::Join(Tags, TEXT(""));
+		OutLabel = FText::FromString(FString::Join(Labels, TEXT(" + ")));
+	}
+
+	/** What every group's bake shares: the mesh, the baker and the outputs. */
+	struct FBakeContext
+	{
+		const FConsolidateSettings* Settings = nullptr;
+		const FMeshDescription* MeshDescription = nullptr;
+		const UStaticMesh* StaticMesh = nullptr;
+		const USkeletalMesh* SkeletalMesh = nullptr;
+		IMaterialBakingModule* Baker = nullptr;
+		FScopedSlowTask* SlowTask = nullptr;
+		TArray<EConsolidateMap> Maps;
+		int32 Size = 0;
+		FString Folder;
+	};
+
+	/** What one group's bake wrote. */
+	struct FGroupOutcome
+	{
+		TArray<FString> Written;
+		TArray<FString> FlatMaps;
+		int32 NumCovered = 0;
+		int32 NumOverlaps = 0;
+	};
+
+	enum class EGroupBake : uint8 { Done, Cancelled, Failed };
 
 	/** Which slot a polygon group is drawn with: the static mesh's section info, else its slot name, else its order. */
 	int32 GetGroupSlot(const UObject* Mesh, const TArray<FName>& ImportedNames, FName GroupSlotName, int32 GroupOrder)
@@ -398,6 +389,7 @@ namespace MaterialConsolidator
 			Slot.SlotIndex = Slots.Num() - 1;
 			Slot.SlotName = SlotName.IsNone() ? ImportedName : SlotName;
 			Slot.Material = Material;
+			GetShadingModelInfo(Material, Slot.ShadingModelTag, Slot.ShadingModelLabel);
 			ImportedNames.Add(ImportedName);
 		};
 		if (const UStaticMesh* StaticMesh = Cast<UStaticMesh>(Mesh))
@@ -436,6 +428,215 @@ namespace MaterialConsolidator
 	FString SuggestBaseName(const UObject* Mesh)
 	{
 		return Mesh ? TEXT("T_") + VrrCore::GetBaseAssetName(Mesh) : FString();
+	}
+
+	TArray<FConsolidateGroup> GetGroups(const TArray<FConsolidateSlot>& Slots, const FConsolidateSettings& Settings)
+	{
+		if (!Settings.bSplitByShadingModel)
+		{
+			TArray<FConsolidateGroup> Groups;
+			FConsolidateGroup& All = Groups.AddDefaulted_GetRef();
+			All.Label = LOCTEXT("AllSlots", "All materials");
+			All.Slots = Slots;
+			return Groups;
+		}
+		return GroupByShadingModel(Slots);
+	}
+
+	TArray<FConsolidateGroup> GroupByShadingModel(const TArray<FConsolidateSlot>& Slots)
+	{
+		TArray<FConsolidateGroup> Groups;
+		for (const FConsolidateSlot& Slot : Slots)
+		{
+			FConsolidateGroup* Group = Groups.FindByPredicate([&Slot](const FConsolidateGroup& G) { return G.Tag == Slot.ShadingModelTag; });
+			if (!Group)
+			{
+				Group = &Groups.AddDefaulted_GetRef();
+				Group->Tag = Slot.ShadingModelTag;
+				Group->Label = Slot.ShadingModelLabel;
+			}
+			Group->Slots.Add(Slot);
+		}
+		return Groups;
+	}
+
+	FString GetGroupBaseName(const FConsolidateGroup& Group, const FConsolidateSettings& Settings)
+	{
+		return Group.Tag.IsEmpty() ? Settings.OutputBaseName : Settings.OutputBaseName + TEXT("_") + Group.Tag;
+	}
+
+	/** Steps 2-5 for one group: bakes each output of its slots into a canvas and writes <BaseName>_<suffix>. */
+	EGroupBake BakeGroup(const FBakeContext& Context, const FConsolidateGroup& Group, const FString& BaseName,
+		TArray<UTexture2D*>& OutTextures, FGroupOutcome& OutOutcome, FText& OutError)
+	{
+		const FConsolidateSettings& Settings = *Context.Settings;
+		const int32 Size = Context.Size;
+		const int32 NumTexels = Size * Size;
+
+		// Who filled each texel (from the first output), to find slots overlapping in the target UVs
+		TArray<int16> Owner;
+		Owner.Init(INDEX_NONE, NumTexels);
+
+		// One output at a time (only one canvas in memory), every slot of the group into it
+		for (int32 MapOrder = 0; MapOrder < Context.Maps.Num(); ++MapOrder)
+		{
+			const EConsolidateMap Map = Context.Maps[MapOrder];
+			const FMaterialPropertyEx Property(GetProperty(Map));
+			const bool bTrackOwners = MapOrder == 0;
+			const FText MapLabel = Group.Tag.IsEmpty() ? GetMapLabel(Map)
+				: FText::Format(LOCTEXT("GroupMapLabel", "{0} {1}"), Group.Label, GetMapLabel(Map));
+
+			FMapCanvas Canvas;
+			Canvas.Size = Size;
+			Canvas.bHDR = Map == EConsolidateMap::Emissive;
+			Canvas.Covered.Init(false, NumTexels);
+			if (Canvas.bHDR)
+			{
+				Canvas.HDRPixels.SetNumZeroed(NumTexels);
+			}
+			else
+			{
+				Canvas.Pixels.SetNumZeroed(NumTexels);
+			}
+
+			for (const FConsolidateSlot& Slot : Group.Slots)
+			{
+				if (Context.SlowTask->ShouldCancel())
+				{
+					return EGroupBake::Cancelled;
+				}
+				Context.SlowTask->EnterProgressFrame(1.0f, FText::Format(LOCTEXT("BakingSlot", "{0}: baking {1}..."), MapLabel, FText::FromName(Slot.SlotName)));
+
+				FMaterialDataEx MaterialData;
+				MaterialData.Material = Slot.Material ? Slot.Material : UMaterial::GetDefaultMaterial(MD_Surface);
+				MaterialData.PropertySizes.Add(Property, FIntPoint(Size, Size));
+				MaterialData.bPerformBorderSmear = false;
+				MaterialData.bPerformShrinking = false;
+				MaterialData.bTangentSpaceNormal = true;
+				MaterialData.BackgroundColor = Background;
+
+				FMeshData MeshData;
+				MeshData.MeshDescription = Context.MeshDescription;
+				MeshData.Mesh = Context.StaticMesh;
+				MeshData.MaterialIndices = Slot.PolygonGroups;
+				MeshData.TextureCoordinateIndex = Settings.TargetChannel;
+				MeshData.PrimitiveData = Context.StaticMesh ? FPrimitiveData(Context.StaticMesh) : FPrimitiveData(Context.SkeletalMesh);
+
+				TArray<FMaterialDataEx*> MaterialSettings = { &MaterialData };
+				TArray<FMeshData*> MeshSettings = { &MeshData };
+				TArray<FBakeOutputEx> Outputs;
+				Context.Baker->BakeMaterials(MaterialSettings, MeshSettings, Outputs);
+
+				const FBakeOutputEx* Output = Outputs.IsEmpty() ? nullptr : &Outputs[0];
+				const FIntPoint* OutputSize = Output ? Output->PropertySizes.Find(Property) : nullptr;
+				const TArray<FColor>* LDR = Output ? Output->PropertyData.Find(Property) : nullptr;
+				const TArray<FFloat16Color>* HDR = Output ? Output->HDRPropertyData.Find(Property) : nullptr;
+				if (!OutputSize || *OutputSize != FIntPoint(Size, Size) || (Canvas.bHDR ? !HDR || HDR->Num() != NumTexels : !LDR || LDR->Num() != NumTexels))
+				{
+					OutError = FText::Format(LOCTEXT("BakeFailed", "Baking {0} of {1} failed. The Output Log may say why."), GetMapLabel(Map), FText::FromName(Slot.SlotName));
+					return EGroupBake::Failed;
+				}
+				Canvas.bLinear = Output->PropertyIsLinearColor.FindRef(Property);
+
+				// Copy the texels this slot covered (the rest kept the background)
+				const FFloat16Color Background16 = FFloat16Color(FLinearColor(Background));
+				for (int32 Index = 0; Index < NumTexels; ++Index)
+				{
+					if (Canvas.bHDR)
+					{
+						const FFloat16Color& Pixel = (*HDR)[Index];
+						if (Pixel == Background16)
+						{
+							continue;
+						}
+						Canvas.HDRPixels[Index] = Pixel;
+					}
+					else
+					{
+						const FColor& Pixel = (*LDR)[Index];
+						if (Pixel.R == Background.R && Pixel.G == Background.G && Pixel.B == Background.B)
+						{
+							continue;
+						}
+						Canvas.Pixels[Index] = Pixel;
+					}
+					if (!Canvas.Covered[Index])
+					{
+						Canvas.Covered[Index] = true;
+						++Canvas.NumCovered;
+					}
+					if (bTrackOwners)
+					{
+						if (Owner[Index] != INDEX_NONE && Owner[Index] != Slot.SlotIndex)
+						{
+							++OutOutcome.NumOverlaps;
+						}
+						Owner[Index] = static_cast<int16>(Slot.SlotIndex);
+					}
+				}
+			}
+
+			Context.SlowTask->EnterProgressFrame(1.0f, FText::Format(LOCTEXT("Writing", "{0}: padding and writing..."), MapLabel));
+			OutOutcome.NumCovered = FMath::Max(OutOutcome.NumCovered, Canvas.NumCovered);
+			if (Canvas.NumCovered == 0)
+			{
+				OutError = Group.Tag.IsEmpty()
+					? FText::Format(LOCTEXT("NothingCovered", "No triangle covers the 0-1 square in UV{0}. Check the target channel."), Settings.TargetChannel)
+					: FText::Format(LOCTEXT("NothingCoveredGroup", "No {0} triangle covers the 0-1 square in UV{1}. Check the target channel."), Group.Label, Settings.TargetChannel);
+				return EGroupBake::Failed;
+			}
+
+			// Skip an output that is one value everywhere
+			FLinearColor FlatValue;
+			const bool bFlat = Canvas.bHDR ? IsFlat(Canvas.HDRPixels, Canvas.Covered, 0.001f, FlatValue) : IsFlat(Canvas.Pixels, Canvas.Covered, 1.0f, FlatValue);
+			if (Settings.bSkipFlatMaps && bFlat)
+			{
+				OutOutcome.FlatMaps.Add(FString::Printf(TEXT("%s %s"), *GetMapLabel(Map).ToString(), *DescribeFlatValue(Map, FlatValue, Canvas.bLinear)));
+				continue;
+			}
+
+			// Pad, fill the rest (flat normal for normals) and write
+			if (Canvas.bHDR)
+			{
+				Pad(Canvas.HDRPixels, Canvas.Covered, Size, Settings.Padding, TOptional<FFloat16Color>());
+			}
+			else
+			{
+				const TOptional<FColor> Fill = Map == EConsolidateMap::Normal ? TOptional<FColor>(FColor(128, 128, 255, 255)) : TOptional<FColor>();
+				Pad(Canvas.Pixels, Canvas.Covered, Size, Settings.Padding, Fill);
+			}
+
+			UTexture2D* Texture = WriteTexture(Map, Canvas, Context.Folder, BaseName + TEXT("_") + GetMapSuffix(Map), Settings.bOverwrite, OutError);
+			if (!Texture)
+			{
+				return EGroupBake::Failed;
+			}
+			OutTextures.Add(Texture);
+			OutOutcome.Written.Add(Texture->GetName());
+		}
+		return EGroupBake::Done;
+	}
+
+	/** The distinct subsurface profiles of a group's materials, when it has more than one (one material can only use one). */
+	TArray<FString> GetMixedSubsurfaceProfiles(const FConsolidateGroup& Group)
+	{
+		TArray<const USubsurfaceProfile*> Profiles;
+		for (const FConsolidateSlot& Slot : Group.Slots)
+		{
+			if (Slot.Material && (Slot.Material->GetShadingModels().HasShadingModel(MSM_SubsurfaceProfile) || Slot.Material->GetShadingModels().HasShadingModel(MSM_Eye)))
+			{
+				Profiles.AddUnique(Slot.Material->GetSubsurfaceProfile_Internal());
+			}
+		}
+		TArray<FString> Names;
+		if (Profiles.Num() > 1)
+		{
+			for (const USubsurfaceProfile* Profile : Profiles)
+			{
+				Names.Add(Profile ? Profile->GetName() : TEXT("engine default"));
+			}
+		}
+		return Names;
 	}
 
 	FConsolidateResult Consolidate(UObject* Mesh, const FConsolidateSettings& Settings)
@@ -496,20 +697,26 @@ namespace MaterialConsolidator
 			}
 		}
 
-		TArray<EConsolidateMap> Maps;
+		// The texture sets: the whole mesh, or one per shading model
+		const TArray<FConsolidateGroup> Groups = GetGroups(Slots, Settings);
+		const bool bSplit = Settings.bSplitByShadingModel;
+
+		FBakeContext Context;
+		Context.Settings = &Settings;
+		Context.MeshDescription = MeshDescription;
+		Context.StaticMesh = Cast<UStaticMesh>(Mesh);
+		Context.SkeletalMesh = Cast<USkeletalMesh>(Mesh);
+		Context.Size = FMath::Clamp(Settings.Resolution, 16, 8192);
+		Context.Folder = VrrCore::NormalizeContentFolder(Settings.OutputFolder);
 		for (int32 MapIndex = 0; MapIndex < static_cast<int32>(EConsolidateMap::Count); ++MapIndex)
 		{
 			if (Settings.bMaps[MapIndex])
 			{
-				Maps.Add(static_cast<EConsolidateMap>(MapIndex));
+				Context.Maps.Add(static_cast<EConsolidateMap>(MapIndex));
 			}
 		}
-
-		const int32 Size = FMath::Clamp(Settings.Resolution, 16, 8192);
+		const int32 Size = Context.Size;
 		const int32 NumTexels = Size * Size;
-		const FString Folder = VrrCore::NormalizeContentFolder(Settings.OutputFolder);
-		const UStaticMesh* StaticMesh = Cast<UStaticMesh>(Mesh);
-		const USkeletalMesh* SkeletalMesh = Cast<USkeletalMesh>(Mesh);
 
 		// The baker's color spaces: Base Color in sRGB, everything else linear; emissive kept in HDR
 		IMaterialBakingModule& Baker = FModuleManager::Get().LoadModuleChecked<IMaterialBakingModule>("MaterialBaking");
@@ -520,197 +727,103 @@ namespace MaterialConsolidator
 			Baker.SetLinearBake(false);
 			Baker.SetEmissiveHDR(false);
 		};
+		Context.Baker = &Baker;
 
-		FScopedSlowTask SlowTask(static_cast<float>(Maps.Num() * (Slots.Num() + 1)),
-			FText::Format(LOCTEXT("Consolidating", "Consolidating {0} materials..."), Slots.Num()));
+		// One frame per slot and output, plus one per group and output to write it
+		FScopedSlowTask SlowTask(static_cast<float>(Context.Maps.Num() * (Slots.Num() + Groups.Num())),
+			bSplit ? FText::Format(LOCTEXT("ConsolidatingSplit", "Consolidating {0} materials into {1} texture sets..."), Slots.Num(), Groups.Num())
+				: FText::Format(LOCTEXT("Consolidating", "Consolidating {0} materials..."), Slots.Num()));
 		SlowTask.MakeDialog(true);
+		Context.SlowTask = &SlowTask;
 
-		// Who filled each texel (from the first output), to find slots overlapping in the target UVs
-		TArray<int16> Owner;
-		Owner.Init(INDEX_NONE, NumTexels);
-		int32 NumOverlaps = 0;
-		int32 NumCovered = 0;
-		TArray<FString> FlatMaps;
-		TArray<FString> Written;
-
-		// 2. One output at a time (only one canvas in memory), every slot into it
-		for (int32 MapOrder = 0; MapOrder < Maps.Num(); ++MapOrder)
+		// 2-5. Bake and write each group's texture set
+		TArray<FGroupOutcome> Outcomes;
+		TArray<FString> AllWritten;
+		for (const FConsolidateGroup& Group : Groups)
 		{
-			const EConsolidateMap Map = Maps[MapOrder];
-			const FMaterialPropertyEx Property(GetProperty(Map));
-			const bool bTrackOwners = MapOrder == 0;
-
-			FMapCanvas Canvas;
-			Canvas.Size = Size;
-			Canvas.bHDR = Map == EConsolidateMap::Emissive;
-			Canvas.Covered.Init(false, NumTexels);
-			if (Canvas.bHDR)
+			FGroupOutcome& Outcome = Outcomes.AddDefaulted_GetRef();
+			FText Error;
+			const EGroupBake Bake = BakeGroup(Context, Group, GetGroupBaseName(Group, Settings), Result.Textures, Outcome, Error);
+			AllWritten.Append(Outcome.Written);
+			if (Bake == EGroupBake::Cancelled)
 			{
-				Canvas.HDRPixels.SetNumZeroed(NumTexels);
-			}
-			else
-			{
-				Canvas.Pixels.SetNumZeroed(NumTexels);
-			}
-
-			for (const FConsolidateSlot& Slot : Slots)
-			{
-				if (SlowTask.ShouldCancel())
-				{
-					Result.Message = Written.IsEmpty() ? CancelledMessage
-						: FText::Format(LOCTEXT("CancelledPartly", "Consolidation cancelled after writing {0}."), FText::FromString(FString::Join(Written, TEXT(", "))));
-					return Result;
-				}
-				SlowTask.EnterProgressFrame(1.0f, FText::Format(LOCTEXT("BakingSlot", "{0}: baking {1}..."), GetMapLabel(Map), FText::FromName(Slot.SlotName)));
-
-				FMaterialDataEx MaterialData;
-				MaterialData.Material = Slot.Material ? Slot.Material : UMaterial::GetDefaultMaterial(MD_Surface);
-				MaterialData.PropertySizes.Add(Property, FIntPoint(Size, Size));
-				MaterialData.bPerformBorderSmear = false;
-				MaterialData.bPerformShrinking = false;
-				MaterialData.bTangentSpaceNormal = true;
-				MaterialData.BackgroundColor = Background;
-
-				FMeshData MeshData;
-				MeshData.MeshDescription = MeshDescription;
-				MeshData.Mesh = StaticMesh;
-				MeshData.MaterialIndices = Slot.PolygonGroups;
-				MeshData.TextureCoordinateIndex = Settings.TargetChannel;
-				MeshData.PrimitiveData = StaticMesh ? FPrimitiveData(StaticMesh) : FPrimitiveData(SkeletalMesh);
-
-				TArray<FMaterialDataEx*> MaterialSettings = { &MaterialData };
-				TArray<FMeshData*> MeshSettings = { &MeshData };
-				TArray<FBakeOutputEx> Outputs;
-				Baker.BakeMaterials(MaterialSettings, MeshSettings, Outputs);
-
-				const FBakeOutputEx* Output = Outputs.IsEmpty() ? nullptr : &Outputs[0];
-				const FIntPoint* OutputSize = Output ? Output->PropertySizes.Find(Property) : nullptr;
-				const TArray<FColor>* LDR = Output ? Output->PropertyData.Find(Property) : nullptr;
-				const TArray<FFloat16Color>* HDR = Output ? Output->HDRPropertyData.Find(Property) : nullptr;
-				if (!OutputSize || *OutputSize != FIntPoint(Size, Size) || (Canvas.bHDR ? !HDR || HDR->Num() != NumTexels : !LDR || LDR->Num() != NumTexels))
-				{
-					Result.Message = FText::Format(LOCTEXT("BakeFailed", "Baking {0} of {1} failed. The Output Log may say why."), GetMapLabel(Map), FText::FromName(Slot.SlotName));
-					return Result;
-				}
-				Canvas.bLinear = Output->PropertyIsLinearColor.FindRef(Property);
-
-				// 3. Copy the texels this slot covered (the rest kept the background)
-				const FFloat16Color Background16 = FFloat16Color(FLinearColor(Background));
-				for (int32 Index = 0; Index < NumTexels; ++Index)
-				{
-					if (Canvas.bHDR)
-					{
-						const FFloat16Color& Pixel = (*HDR)[Index];
-						if (Pixel == Background16)
-						{
-							continue;
-						}
-						Canvas.HDRPixels[Index] = Pixel;
-					}
-					else
-					{
-						const FColor& Pixel = (*LDR)[Index];
-						if (Pixel.R == Background.R && Pixel.G == Background.G && Pixel.B == Background.B)
-						{
-							continue;
-						}
-						Canvas.Pixels[Index] = Pixel;
-					}
-					if (!Canvas.Covered[Index])
-					{
-						Canvas.Covered[Index] = true;
-						++Canvas.NumCovered;
-					}
-					if (bTrackOwners)
-					{
-						if (Owner[Index] != INDEX_NONE && Owner[Index] != Slot.SlotIndex)
-						{
-							++NumOverlaps;
-						}
-						Owner[Index] = static_cast<int16>(Slot.SlotIndex);
-					}
-				}
-			}
-
-			SlowTask.EnterProgressFrame(1.0f, FText::Format(LOCTEXT("Writing", "{0}: padding and writing..."), GetMapLabel(Map)));
-			NumCovered = FMath::Max(NumCovered, Canvas.NumCovered);
-			if (Canvas.NumCovered == 0)
-			{
-				Result.Message = FText::Format(LOCTEXT("NothingCovered", "No triangle covers the 0-1 square in UV{0}. Check the target channel."), Settings.TargetChannel);
+				Result.Message = AllWritten.IsEmpty() ? CancelledMessage
+					: FText::Format(LOCTEXT("CancelledPartly", "Consolidation cancelled after writing {0}."), FText::FromString(FString::Join(AllWritten, TEXT(", "))));
 				return Result;
 			}
-
-			// 4. Skip an output that is one value everywhere
-			FLinearColor FlatValue;
-			const bool bFlat = Canvas.bHDR ? IsFlat(Canvas.HDRPixels, Canvas.Covered, 0.001f, FlatValue) : IsFlat(Canvas.Pixels, Canvas.Covered, 1.0f, FlatValue);
-			if (Settings.bSkipFlatMaps && bFlat)
-			{
-				FlatMaps.Add(FString::Printf(TEXT("%s %s"), *GetMapLabel(Map).ToString(), *DescribeFlatValue(Map, FlatValue, Canvas.bLinear)));
-				continue;
-			}
-
-			// 5. Pad, fill the rest (flat normal for normals) and write
-			if (Canvas.bHDR)
-			{
-				Pad(Canvas.HDRPixels, Canvas.Covered, Size, Settings.Padding, TOptional<FFloat16Color>());
-			}
-			else
-			{
-				const TOptional<FColor> Fill = Map == EConsolidateMap::Normal ? TOptional<FColor>(FColor(128, 128, 255, 255)) : TOptional<FColor>();
-				Pad(Canvas.Pixels, Canvas.Covered, Size, Settings.Padding, Fill);
-			}
-
-			FText Error;
-			UTexture2D* Texture = WriteTexture(Map, Canvas, Folder, Settings.OutputBaseName + TEXT("_") + GetMapSuffix(Map), Settings.bOverwrite, Error);
-			if (!Texture)
+			if (Bake == EGroupBake::Failed)
 			{
 				Result.Message = Error;
 				return Result;
 			}
-			Result.Textures.Add(Texture);
-			Written.Add(Texture->GetName());
 		}
 
 		// Save
 		bool bSaved = false;
 		if (Settings.bSaveToDisk && !Result.Textures.IsEmpty())
 		{
-			TArray<UPackage*> Packages;
-			for (UTexture2D* Texture : Result.Textures)
-			{
-				Packages.Add(Texture->GetOutermost());
-			}
-			bSaved = UEditorLoadingAndSavingUtils::SavePackages(Packages, false);
+			bSaved = VrrCore::SaveAssets(TArray<UObject*>(Result.Textures));
 		}
 
-		// Result: what was written, coverage, flat outputs, then warnings
-		FText Message = Written.IsEmpty()
-			? FText::Format(LOCTEXT("NoneWritten", "Consolidated {0} materials into UV{1}, but every output was flat, so no texture was written."), Slots.Num(), Settings.TargetChannel)
-			: FText::Format(LOCTEXT("Done", "Consolidated {0} materials into UV{1} ({2} x {2}): {3}. {4} of the texture covered."),
-				Slots.Num(), Settings.TargetChannel, Size, FText::FromString(FString::Join(Written, TEXT(", "))),
-				FText::AsPercent(static_cast<float>(NumCovered) / NumTexels));
-		if (!FlatMaps.IsEmpty())
+		// Result: each texture set's textures, coverage and flat outputs, then saving, then warnings
+		TArray<FText> Lines;
+		if (bSplit)
 		{
-			Message = FText::Format(LOCTEXT("Flat", "{0} Flat, not written (use a constant in the material): {1}."), Message, FText::FromString(FString::Join(FlatMaps, TEXT(", "))));
+			Lines.Add(FText::Format(LOCTEXT("DoneSplit", "Consolidated {0} materials into UV{1} ({2} x {2}) as {3} texture sets, one per shading model."),
+				Slots.Num(), Settings.TargetChannel, Size, Groups.Num()));
 		}
-		if (!Written.IsEmpty())
+		for (int32 GroupIndex = 0; GroupIndex < Groups.Num(); ++GroupIndex)
 		{
-			if (Settings.bSaveToDisk)
+			const FConsolidateGroup& Group = Groups[GroupIndex];
+			const FGroupOutcome& Outcome = Outcomes[GroupIndex];
+			const FText Covered = FText::AsPercent(static_cast<float>(Outcome.NumCovered) / NumTexels);
+			const FText Written = FText::FromString(FString::Join(Outcome.Written, TEXT(", ")));
+			FText Line;
+			if (!bSplit)
 			{
-				Message = FText::Format(bSaved ? LOCTEXT("Saved", "{0} Saved.") : LOCTEXT("SaveFailed", "{0} Saving failed: save them from the Content Browser."), Message);
+				Line = Outcome.Written.IsEmpty()
+					? FText::Format(LOCTEXT("NoneWritten", "Consolidated {0} materials into UV{1}, but every output was flat, so no texture was written."), Slots.Num(), Settings.TargetChannel)
+					: FText::Format(LOCTEXT("Done", "Consolidated {0} materials into UV{1} ({2} x {2}): {3}. {4} of the texture covered."),
+						Slots.Num(), Settings.TargetChannel, Size, Written, Covered);
 			}
 			else
 			{
-				Message = FText::Format(LOCTEXT("Unsaved", "{0} Not saved yet."), Message);
+				Line = Outcome.Written.IsEmpty()
+					? FText::Format(LOCTEXT("GroupNoneWritten", "{0} ({1} materials): every output was flat, so no texture was written."), Group.Label, Group.Slots.Num())
+					: FText::Format(LOCTEXT("GroupDone", "{0} ({1} materials): {2}. {3} of the texture covered."), Group.Label, Group.Slots.Num(), Written, Covered);
+			}
+			if (!Outcome.FlatMaps.IsEmpty())
+			{
+				Line = FText::Format(LOCTEXT("Flat", "{0} Flat, not written (use a constant in the material): {1}."), Line, FText::FromString(FString::Join(Outcome.FlatMaps, TEXT(", "))));
+			}
+			Lines.Add(Line);
+		}
+		if (!AllWritten.IsEmpty())
+		{
+			Lines.Add(!Settings.bSaveToDisk ? LOCTEXT("Unsaved", "Not saved yet.")
+				: bSaved ? LOCTEXT("Saved", "Saved.") : LOCTEXT("SaveFailed", "Saving failed: save them from the Content Browser."));
+		}
+		for (int32 GroupIndex = 0; GroupIndex < Groups.Num(); ++GroupIndex)
+		{
+			const FConsolidateGroup& Group = Groups[GroupIndex];
+			const int32 NumOverlaps = Outcomes[GroupIndex].NumOverlaps;
+			if (NumOverlaps > 0)
+			{
+				Lines.Add(bSplit
+					? FText::Format(LOCTEXT("OverlapsGroup", "{0}: {1} texels are covered by more than one of its materials in UV{2}, so the last slot wins there. Give each of its slots its own space in that channel."),
+						Group.Label, NumOverlaps, Settings.TargetChannel)
+					: FText::Format(LOCTEXT("Overlaps", "{0} texels are covered by more than one material in UV{1}, so the last slot wins there. Use a unique channel, such as one from UV Layouts."),
+						NumOverlaps, Settings.TargetChannel));
+			}
+			const TArray<FString> Profiles = GetMixedSubsurfaceProfiles(Group);
+			if (!Profiles.IsEmpty())
+			{
+				Lines.Add(FText::Format(LOCTEXT("MixedProfiles", "{0}: its materials use {1} different subsurface profiles ({2}), but a material sampling one texture set can only use one."),
+					Group.Label, Profiles.Num(), FText::FromString(FString::Join(Profiles, TEXT(", ")))));
 			}
 		}
-		if (NumOverlaps > 0)
-		{
-			Message = FText::Format(LOCTEXT("Overlaps", "{0} {1} texels are covered by more than one material in UV{2}, so the last slot wins there. Use a unique channel, such as one from UV Layouts."),
-				Message, NumOverlaps, Settings.TargetChannel);
-		}
 		Result.bSuccess = true;
-		Result.Message = Message;
+		Result.Message = FText::Join(FText::FromString(TEXT(" ")), Lines);
 		return Result;
 	}
 }

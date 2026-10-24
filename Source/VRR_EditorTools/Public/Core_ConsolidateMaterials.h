@@ -30,6 +30,11 @@ struct FConsolidateSettings
 	int32 Resolution = 2048;
 	/** Pixels each island grows by, so filtering and mips don't pull in empty texels. */
 	int32 Padding = 8;
+	/**
+	 * One texture set per shading model (Default Lit, Preintegrated Skin, Subsurface Profile...) instead of one for
+	 * the whole mesh. Each set is <Base>_<ShadingModel>_<suffix>, and only that shading model's slots are baked into it.
+	 */
+	bool bSplitByShadingModel = false;
 
 	/** Which outputs to write, indexed by EConsolidateMap. */
 	bool bMaps[static_cast<int32>(EConsolidateMap::Count)] = { true, true, true, true, true, true, true, true, true };
@@ -65,6 +70,19 @@ struct FConsolidateSlot
 	int32 NumTriangles = 0;
 	/** The mesh data's polygon groups drawn with this slot (what the material baker calls section indices). */
 	TArray<int32> PolygonGroups;
+	/** The material's shading model(s), for texture names: "DefaultLit", "PreintegratedSkin"... */
+	FString ShadingModelTag;
+	/** "Default Lit", "Preintegrated Skin"... */
+	FText ShadingModelLabel;
+};
+
+/** Slots baked into one texture set: every slot, or the slots sharing a shading model. */
+struct FConsolidateGroup
+{
+	/** Empty for the whole mesh, otherwise the shading model tag that goes in the texture names. */
+	FString Tag;
+	FText Label;
+	TArray<FConsolidateSlot> Slots;
 };
 
 struct FConsolidateResult
@@ -95,6 +113,15 @@ namespace MaterialConsolidator
 
 	/** T_<mesh name without SM_/SK_> */
 	FString SuggestBaseName(const UObject* Mesh);
+
+	/** The texture sets the settings produce: one with every slot, or one per shading model (in first-slot order). */
+	TArray<FConsolidateGroup> GetGroups(const TArray<FConsolidateSlot>& Slots, const FConsolidateSettings& Settings);
+
+	/** One group per shading model (tagged "DefaultLit", "PreintegratedSkin"...), in first-slot order. Also used by the Mesh Maps bake. */
+	TArray<FConsolidateGroup> GroupByShadingModel(const TArray<FConsolidateSlot>& Slots);
+
+	/** <Base> for the whole mesh, <Base>_<Tag> for a shading model's set. Each texture adds _<suffix>. */
+	FString GetGroupBaseName(const FConsolidateGroup& Group, const FConsolidateSettings& Settings);
 
 	FConsolidateResult Consolidate(UObject* Mesh, const FConsolidateSettings& Settings);
 }

@@ -11,21 +11,13 @@
 #include "Menu_BakeNormals.h"
 
 #include "Core_Common.h"
-#include "Engine/SkeletalMesh.h"
-#include "Engine/StaticMesh.h"
 #include "Engine/Texture2D.h"
 #include "MenuWidgets.h"
 #include "MeshDescription.h"
 #include "Misc/MessageDialog.h"
 #include "Misc/PackageName.h"
-#include "PropertyCustomizationHelpers.h"
-#include "Widgets/Input/SButton.h"
-#include "Widgets/Input/SComboBox.h"
-#include "Widgets/Input/SEditableTextBox.h"
 #include "Widgets/Input/SSegmentedControl.h"
-#include "Widgets/Input/SSpinBox.h"
 #include "Widgets/Layout/SBox.h"
-#include "Widgets/Layout/SSeparator.h"
 #include "Widgets/Text/STextBlock.h"
 
 #define LOCTEXT_NAMESPACE "SMenu_BakeNormals"
@@ -33,12 +25,6 @@
 /** Builds the page: one card per step, top to bottom. */
 void SMenu_BakeNormals::Construct(const FArguments& InArgs)
 {
-	for (int32 Size : { 256, 512, 1024, 2048, 4096 })
-	{
-		ResolutionOptions.Add(MakeShared<int32>(Size));
-	}
-	Resolution = ResolutionOptions[3]; // 2048
-
 	ChildSlot
 	[
 		VrrMenu::Stack({
@@ -58,31 +44,10 @@ TSharedRef<SWidget> SMenu_BakeNormals::CreateMeshSection()
 {
 	return VrrMenu::Card(LOCTEXT("MeshHeader", "Source Mesh"), VrrMenu::Rows({
 		VrrMenu::Row(LOCTEXT("MeshLabel", "Mesh"),
-			SNew(SHorizontalBox)
-			+ SHorizontalBox::Slot().AutoWidth()
-			[
-				SNew(SBox)
-				.WidthOverride(VrrMenu::WideWidth)
-				[
-					SNew(SObjectPropertyEntryBox)
-					.AllowedClass(UStreamableRenderAsset::StaticClass())
-					.OnShouldFilterAsset_Lambda([](const FAssetData& AssetData)
-					{
-						// true hides the asset: only static and skeletal meshes
-						return !AssetData.IsInstanceOf(UStaticMesh::StaticClass()) && !AssetData.IsInstanceOf(USkeletalMesh::StaticClass());
-					})
-					.ObjectPath_Lambda([this]() { return Mesh.IsValid() ? Mesh->GetPathName() : FString(); })
-					.OnObjectChanged_Lambda([this](const FAssetData& AssetData) { SetMesh(AssetData.GetAsset()); })
-					.DisplayThumbnail(true)
-				]
-			]
-			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(8.0f, 0.0f, 0.0f, 0.0f)
-			[
-				SNew(SButton)
-				.Text(LOCTEXT("UseSelection", "Use Selected"))
-				.ToolTipText(LOCTEXT("UseSelectionTip", "Use the static or skeletal mesh selected in the Content Browser"))
-				.OnClicked(this, &SMenu_BakeNormals::OnUseSelectionClicked)
-			]),
+			VrrMenu::MeshPicker(VrrMenu::EMeshTypes::StaticOrSkeletal,
+				[this]() { return Mesh.Get(); },
+				[this](UObject* NewMesh) { SetMesh(NewMesh); },
+				[this](const FText& Error) { SetStatus(Error, true); })),
 		VrrMenu::Note(TAttribute<FText>::CreateSP(this, &SMenu_BakeNormals::GetMeshInfoText)),
 	}));
 }
@@ -183,40 +148,9 @@ TSharedRef<SWidget> SMenu_BakeNormals::CreateOutputSection()
 
 		// Texture
 		OnlyWhen(TextureOnly, VrrMenu::Row(LOCTEXT("UVChannel", "UV channel"),
-			SAssignNew(UVChannelCombo, SComboBox<TSharedPtr<int32>>)
-			.OptionsSource(&UVChannelOptions)
-			.OnGenerateWidget_Lambda([](TSharedPtr<int32> Option)
-			{
-				return SNew(STextBlock).Text(FText::AsNumber(*Option));
-			})
-			.OnSelectionChanged_Lambda([this](TSharedPtr<int32> Option, ESelectInfo::Type)
-			{
-				if (Option.IsValid())
-				{
-					Settings.UVChannel = *Option;
-				}
-			})
-			[
-				SNew(STextBlock).Text_Lambda([this]() { return FText::AsNumber(Settings.UVChannel); })
-			])),
+			VrrMenu::UVChannelCombo([this]() { return NumUVChannels; }, &Settings.UVChannel))),
 		OnlyWhen(TextureOnly, VrrMenu::Row(LOCTEXT("Resolution", "Resolution"),
-			SNew(SComboBox<TSharedPtr<int32>>)
-			.OptionsSource(&ResolutionOptions)
-			.InitiallySelectedItem(Resolution)
-			.OnGenerateWidget_Lambda([](TSharedPtr<int32> Option)
-			{
-				return SNew(STextBlock).Text(FText::AsNumber(*Option, &FNumberFormattingOptions::DefaultNoGrouping()));
-			})
-			.OnSelectionChanged_Lambda([this](TSharedPtr<int32> Option, ESelectInfo::Type)
-			{
-				if (Option.IsValid())
-				{
-					Resolution = Option;
-				}
-			})
-			[
-				SNew(STextBlock).Text_Lambda([this]() { return FText::AsNumber(*Resolution, &FNumberFormattingOptions::DefaultNoGrouping()); })
-			])),
+			VrrMenu::ResolutionCombo(&Settings.Resolution, { 256, 512, 1024, 2048, 4096 }))),
 		OnlyWhen(TextureOnly, VrrMenu::Row(LOCTEXT("Padding", "Padding (px)"),
 			VrrMenu::IntField(&Settings.Padding, 0, 32),
 			LOCTEXT("PaddingTip", "Grow each UV island by this many pixels so bilinear sampling at the edges doesn't pick up empty texels"))),
@@ -251,9 +185,14 @@ TSharedRef<SWidget> SMenu_BakeNormals::CreateBakeSection()
 }
 
 // BEHAVIOR
-/** Switches to a new mesh: resets the per-mesh state and suggests output folder, name and UV channel. */
+/**
+ * Switches to a new mesh: resets the per-mesh state and suggests output folder, name and UV channel.
+ * Called again with the same mesh after a bake, it only refreshes the info (vertex colors now present),
+ * keeping the chosen UV channel and output name.
+ */
 void SMenu_BakeNormals::SetMesh(UObject* NewMesh)
 {
+	const bool bNewMesh = NewMesh != Mesh.Get();
 	Mesh = VrrCore::IsStaticOrSkeletalMesh(NewMesh) ? NewMesh : nullptr;
 	NumUVChannels = 0;
 	bMeshHasVertexColors = false;
@@ -268,20 +207,15 @@ void SMenu_BakeNormals::SetMesh(UObject* NewMesh)
 
 		NumUVChannels = VrrCore::GetNumUVChannels(Mesh.Get());
 		bMeshHasVertexColors = SmoothNormalBaker::HasVertexColors(Mesh.Get());
-		Settings.OutputFolder = FPackageName::GetLongPackagePath(Mesh->GetOutermost()->GetName());
-		Settings.OutputName = SmoothNormalBaker::SuggestTextureName(Mesh.Get());
+		if (bNewMesh)
+		{
+			Settings.OutputFolder = FPackageName::GetLongPackagePath(Mesh->GetOutermost()->GetName());
+			Settings.OutputName = SmoothNormalBaker::SuggestTextureName(Mesh.Get());
+		}
 	}
-
-	UVChannelOptions.Reset();
-	for (int32 Channel = 0; Channel < NumUVChannels; ++Channel)
+	if (bNewMesh || Settings.UVChannel >= NumUVChannels)
 	{
-		UVChannelOptions.Add(MakeShared<int32>(Channel));
-	}
-	Settings.UVChannel = 0;
-	if (UVChannelCombo.IsValid())
-	{
-		UVChannelCombo->RefreshOptions();
-		UVChannelCombo->SetSelectedItem(UVChannelOptions.IsEmpty() ? nullptr : UVChannelOptions[0]);
+		Settings.UVChannel = 0;
 	}
 }
 
@@ -332,22 +266,6 @@ FText SMenu_BakeNormals::GetMeshInfoText() const
 		bMeshHasVertexColors ? LOCTEXT("HasColors", "has vertex colors") : LOCTEXT("NoColors", "no vertex colors"));
 }
 
-/** Picks the first Static or Skeletal Mesh selected in the Content Browser. */
-FReply SMenu_BakeNormals::OnUseSelectionClicked()
-{
-	for (const FAssetData& Asset : VrrCore::GetSelectedAssets())
-	{
-		if (Asset.IsInstanceOf(UStaticMesh::StaticClass()) || Asset.IsInstanceOf(USkeletalMesh::StaticClass()))
-		{
-			SetMesh(Asset.GetAsset());
-			return FReply::Handled();
-		}
-	}
-
-	SetStatus(LOCTEXT("NoMeshSelected", "Select a Static Mesh or Skeletal Mesh in the Content Browser first."), true);
-	return FReply::Handled();
-}
-
 /** Confirms overwriting vertex colors if needed, bakes, then reports and refreshes the info line. */
 FReply SMenu_BakeNormals::OnBakeClicked()
 {
@@ -369,7 +287,6 @@ FReply SMenu_BakeNormals::OnBakeClicked()
 		}
 	}
 
-	Settings.Resolution = Resolution.IsValid() ? *Resolution : 2048;
 	const FSmoothNormalBakeResult Result = SmoothNormalBaker::Bake(Mesh.Get(), Settings);
 
 	VrrMenu::Notify(Result.bSuccess ? LOCTEXT("BakeDone", "Smooth normals baked") : Result.Message,
@@ -379,7 +296,7 @@ FReply SMenu_BakeNormals::OnBakeClicked()
 		VrrCore::ShowInContentBrowser({ Result.Texture });
 	}
 
-	// Refresh the info line (vertex colors now present, LOD counts)
+	// Refresh the info line (vertex colors now present); the same mesh keeps its settings
 	SetMesh(Mesh.Get());
 	SetStatus(Result.Message, !Result.bSuccess);
 	return FReply::Handled();

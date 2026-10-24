@@ -1,4 +1,13 @@
 // Fill out your copyright notice in the Description page of Project Settings.
+
+/*
+ * Windows-only hardware checks, not used by the Toolbox pages yet.
+ *
+ *  - GetDiskSpeed: times reading 1 MB straight from a drive (QueryPerformanceCounter) and prints MB/s to stdout
+ *    (not the Output Log). Note: it opens drive C: whatever DriveLetter is passed.
+ *  - GetAvailableVRAMAmount: asks DXGI (IDXGIAdapter3::QueryVideoMemoryInfo) about the first adapter's local
+ *    video memory. Despite the name it returns the memory in use (CurrentUsage), in MB.
+ */
 #include "MemoryChecks.h"
 
 MemoryChecks::MemoryChecks()

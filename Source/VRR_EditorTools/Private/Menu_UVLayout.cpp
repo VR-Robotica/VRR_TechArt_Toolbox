@@ -10,12 +10,10 @@
 #include "Menu_UVLayout.h"
 
 #include "Core_Common.h"
-#include "Engine/SkeletalMesh.h"
 #include "Engine/StaticMesh.h"
 #include "Framework/Application/SlateApplication.h"
 #include "MenuWidgets.h"
 #include "MeshDescription.h"
-#include "PropertyCustomizationHelpers.h"
 #include "Rendering/DrawElements.h"
 #include "Rendering/SlateRenderer.h"
 #include "Styling/AppStyle.h"
@@ -187,18 +185,6 @@ private:
 /** Builds the page: general settings (full width), then the balanced and grouped layouts (settings | preview). */
 void SMenu_UVLayout::Construct(const FArguments& InArgs)
 {
-	for (int32 Size : { 256, 512, 1024, 2048, 4096 })
-	{
-		ResolutionOptions.Add(MakeShared<int32>(Size));
-	}
-	for (int32 Size : { 16, 32, 64, 128, 256, 512, 1024, 2048, 4096 })
-	{
-		BalancedResolutionOptions.Add(MakeShared<int32>(Size));
-	}
-	for (int32 Size : { 128, 256, 512, 1024 })
-	{
-		PackDetailOptions.Add(MakeShared<int32>(Size));
-	}
 	PackMethodOptions.Add(MakeShared<EUVPackMethod>(EUVPackMethod::Shapes));
 	PackMethodOptions.Add(MakeShared<EUVPackMethod>(EUVPackMethod::Boxes));
 
@@ -213,25 +199,16 @@ void SMenu_UVLayout::Construct(const FArguments& InArgs)
 }
 
 // LAYOUT
-/** A UV channel combo writing into *Value. Target combos label the lightmap and new channels. */
-TSharedRef<SWidget> SMenu_UVLayout::CreateChannelCombo(TSharedPtr<SComboBox<TSharedPtr<int32>>>& OutCombo, TArray<TSharedPtr<int32>>* Options, int32* Value, bool bTarget)
+/**
+ * A UV channel combo writing into *Value (VrrMenu::IntCombo). The options are re-read each time the list opens,
+ * so channels added by Apply show up without a refresh. Target combos label the lightmap and new channels.
+ */
+TSharedRef<SWidget> SMenu_UVLayout::CreateChannelCombo(int32* Value, bool bTarget)
 {
-	return SAssignNew(OutCombo, SComboBox<TSharedPtr<int32>>)
-		.OptionsSource(Options)
-		.OnGenerateWidget_Lambda([this, bTarget](TSharedPtr<int32> Option)
-		{
-			return SNew(STextBlock).Text(GetChannelLabel(*Option, bTarget));
-		})
-		.OnSelectionChanged_Lambda([Value](TSharedPtr<int32> Option, ESelectInfo::Type)
-		{
-			if (Option.IsValid())
-			{
-				*Value = *Option;
-			}
-		})
-		[
-			SNew(STextBlock).Text_Lambda([this, Value, bTarget]() { return Mesh.IsValid() ? GetChannelLabel(*Value, bTarget) : FText::GetEmpty(); })
-		];
+	return VrrMenu::IntCombo(
+		[this, bTarget]() { return GetChannelOptions(bTarget); },
+		Value,
+		[this, bTarget](int32 Channel) { return GetChannelLabel(Channel, bTarget); });
 }
 
 static FText GetPackMethodLabel(EUVPackMethod Method)
@@ -246,27 +223,6 @@ static FText GetPackMethodTip(EUVPackMethod Method)
 		: LOCTEXT("PackBoxesTip", "Bounding boxes on shelves");
 }
 
-/** A texture size combo writing into *Value. */
-static TSharedRef<SWidget> MakeResolutionCombo(TArray<TSharedPtr<int32>>* Options, int32* Value)
-{
-	return SNew(SComboBox<TSharedPtr<int32>>)
-		.OptionsSource(Options)
-		.OnGenerateWidget_Lambda([](TSharedPtr<int32> Option)
-		{
-			return SNew(STextBlock).Text(FText::AsNumber(*Option, &FNumberFormattingOptions::DefaultNoGrouping()));
-		})
-		.OnSelectionChanged_Lambda([Value](TSharedPtr<int32> Option, ESelectInfo::Type)
-		{
-			if (Option.IsValid())
-			{
-				*Value = *Option;
-			}
-		})
-		[
-			SNew(STextBlock).Text_Lambda([Value]() { return FText::AsNumber(*Value, &FNumberFormattingOptions::DefaultNoGrouping()); })
-		];
-}
-
 /** Full width: the mesh, the source channel, and the options both layouts share (rotation, LODs). */
 TSharedRef<SWidget> SMenu_UVLayout::CreateGeneralSection()
 {
@@ -276,33 +232,13 @@ TSharedRef<SWidget> SMenu_UVLayout::CreateGeneralSection()
 			"These settings are used by both layouts below."),
 		VrrMenu::Rows({
 			VrrMenu::Row(LOCTEXT("MeshLabel", "Mesh"),
-				SNew(SHorizontalBox)
-				+ SHorizontalBox::Slot().AutoWidth()
-				[
-					SNew(SBox)
-					.WidthOverride(VrrMenu::WideWidth)
-					[
-						SNew(SObjectPropertyEntryBox)
-						.AllowedClass(UStreamableRenderAsset::StaticClass())
-						.OnShouldFilterAsset_Lambda([](const FAssetData& AssetData)
-						{
-							return !AssetData.IsInstanceOf(UStaticMesh::StaticClass()) && !AssetData.IsInstanceOf(USkeletalMesh::StaticClass());
-						})
-						.ObjectPath_Lambda([this]() { return Mesh.IsValid() ? Mesh->GetPathName() : FString(); })
-						.OnObjectChanged_Lambda([this](const FAssetData& AssetData) { SetMesh(AssetData.GetAsset()); })
-						.DisplayThumbnail(true)
-					]
-				]
-				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(8.0f, 0.0f, 0.0f, 0.0f)
-				[
-					SNew(SButton)
-					.Text(LOCTEXT("UseSelection", "Use Selected"))
-					.ToolTipText(LOCTEXT("UseSelectionTip", "Use the static or skeletal mesh selected in the Content Browser"))
-					.OnClicked(this, &SMenu_UVLayout::OnUseSelectionClicked)
-				]),
+				VrrMenu::MeshPicker(VrrMenu::EMeshTypes::StaticOrSkeletal,
+					[this]() { return Mesh.Get(); },
+					[this](UObject* NewMesh) { SetMesh(NewMesh); },
+					[this](const FText& Error) { SetStatus(Error, true); })),
 			VrrMenu::Note(TAttribute<FText>::CreateSP(this, &SMenu_UVLayout::GetMeshInfoText)),
 			VrrMenu::Row(LOCTEXT("Source", "Source UVs"),
-				CreateChannelCombo(SourceCombo, &SourceOptions, &Settings.SourceChannel, false),
+				CreateChannelCombo(&Settings.SourceChannel, false),
 				LOCTEXT("SourceTip", "The channel whose islands (UV seams) are kept. Usually UV0, the texturing channel")),
 			VrrMenu::Row(LOCTEXT("Rotate", "Rotation"),
 				VrrMenu::CheckBox(&Settings.bRotateIslands, LOCTEXT("RotateIslands", "Rotate islands to fit"),
@@ -338,14 +274,14 @@ TSharedRef<SWidget> SMenu_UVLayout::CreateBalancedSection()
 				SNew(STextBlock).Text(LOCTEXT("BalancedAsLightmap", "As Lightmap UVs"))
 			]),
 		VrrMenu::Row(LOCTEXT("BalancedTarget", "Target UVs"),
-			CreateChannelCombo(BalancedTargetCombo, &TargetOptions, &Settings.BalancedTargetChannel, true),
+			CreateChannelCombo(&Settings.BalancedTargetChannel, true),
 			LOCTEXT("BalancedTargetTip", "Where the balanced layout goes when it isn't the lightmap. A lightmap already there moves up one channel"),
 			TAttribute<bool>::CreateLambda([IsLightmap]() { return !IsLightmap(); })),
 		VrrMenu::Row(LOCTEXT("BalancedPadding", "Padding (px)"),
 			VrrMenu::IntField(&Settings.BalancedPadding, 0, 64),
 			LOCTEXT("BalancedPaddingTip", "Pixels between islands at the resolution below (lightmap texels when used as the lightmap; 2 is usually enough there)")),
 		VrrMenu::Row(LOCTEXT("BalancedResolution", "Resolution"),
-			MakeResolutionCombo(&BalancedResolutionOptions, &Settings.BalancedResolution),
+			VrrMenu::ResolutionCombo(&Settings.BalancedResolution, { 16, 32, 64, 128, 256, 512, 1024, 2048, 4096 }),
 			LOCTEXT("BalancedResolutionTip", "The texture size the padding is measured in. As Lightmap UVs it is the mesh's Light Map Resolution (set on the mesh, starting from its current value)")),
 		VrrMenu::Row(LOCTEXT("BalancedPacking", "Packing"),
 			SNew(SComboBox<TSharedPtr<EUVPackMethod>>)
@@ -367,7 +303,7 @@ TSharedRef<SWidget> SMenu_UVLayout::CreateBalancedSection()
 			LOCTEXT("BalancedPackingTip", "Shapes (tight): islands are drawn onto a grid, so they nest into each other's gaps and holes, and each tries all four quarter turns (with Rotation on). Uses the most space; slower on meshes with many islands.\n"
 				"Boxes (fast): each island's bounding box is packed on shelves. Quick, but the space around irregular islands stays empty")),
 		VrrMenu::Row(LOCTEXT("BalancedDetail", "Packing detail"),
-			MakeResolutionCombo(&PackDetailOptions, &Settings.BalancedPackDetail),
+			VrrMenu::ResolutionCombo(&Settings.BalancedPackDetail, { 128, 256, 512, 1024 }),
 			LOCTEXT("BalancedDetailTip", "Shapes: grid cells across the square. Finer packs tighter but takes longer. Never finer than the resolution above, so lightmaps pack texel by texel"),
 			TAttribute<bool>::CreateLambda([this]() { return Settings.BalancedPackMethod == EUVPackMethod::Shapes; })),
 		VrrMenu::Row(LOCTEXT("BalancedFill", "Fill"),
@@ -420,7 +356,7 @@ TSharedRef<SWidget> SMenu_UVLayout::CreateGroupedSection()
 {
 	TSharedRef<SWidget> SettingsColumn = VrrMenu::Rows({
 		VrrMenu::Row(LOCTEXT("Target", "Target UVs"),
-			CreateChannelCombo(TargetCombo, &TargetOptions, &Settings.TargetChannel, true),
+			CreateChannelCombo(&Settings.TargetChannel, true),
 			LOCTEXT("TargetTip", "Where the new layout goes. Usually UV1; a lightmap there moves to UV2")),
 		VrrMenu::Row(LOCTEXT("GroupLayout", "Layout"),
 			VrrMenu::CheckBox(&Settings.bGroupAsUDIMs, LOCTEXT("GroupAsUDIMs", "UDIM tiles (one per material)"),
@@ -436,7 +372,7 @@ TSharedRef<SWidget> SMenu_UVLayout::CreateGroupedSection()
 			VrrMenu::IntField(&Settings.Padding, 0, 64),
 			LOCTEXT("PaddingTip", "Pixels between islands at the resolution below, so baked textures can pad their islands without bleeding")),
 		VrrMenu::Row(LOCTEXT("PaddingRes", "Resolution"),
-			MakeResolutionCombo(&ResolutionOptions, &Settings.PaddingResolution),
+			VrrMenu::ResolutionCombo(&Settings.PaddingResolution, { 256, 512, 1024, 2048, 4096 }),
 			LOCTEXT("PaddingResTip", "The texture size you plan to bake at. Padding is measured in its pixels")),
 		VrrMenu::Note(TAttribute<FText>::CreateLambda([this]()
 		{
@@ -476,39 +412,23 @@ void SMenu_UVLayout::SetMesh(UObject* NewMesh)
 	Settings.TargetChannel = Mesh.IsValid() ? FMath::Min(1, NumUVChannels) : 1;
 	Settings.BalancedTargetChannel = Settings.TargetChannel;
 	ResetBalancedDefaults();
-	RefreshChannelOptions();
 
 	// Both previews: laid out for a usable mesh, cleared otherwise
 	UpdatePreviews();
 }
 
 /** Source: every existing channel. Target: every existing channel plus the next new one (within the mesh type's limit). */
-void SMenu_UVLayout::RefreshChannelOptions()
+TArray<int32> SMenu_UVLayout::GetChannelOptions(bool bTarget) const
 {
-	SourceOptions.Reset();
-	TargetOptions.Reset();
-	for (int32 Channel = 0; Channel < NumUVChannels; ++Channel)
+	TArray<int32> Channels;
+	const int32 Last = !Mesh.IsValid() ? -1
+		: bTarget ? FMath::Min(NumUVChannels, UVLayout::GetMaxUVChannels(Mesh.Get()) - 1)
+		: NumUVChannels - 1;
+	for (int32 Channel = 0; Channel <= Last; ++Channel)
 	{
-		SourceOptions.Add(MakeShared<int32>(Channel));
+		Channels.Add(Channel);
 	}
-	const int32 MaxTarget = Mesh.IsValid() ? FMath::Min(NumUVChannels, UVLayout::GetMaxUVChannels(Mesh.Get()) - 1) : -1;
-	for (int32 Channel = 0; Channel <= MaxTarget; ++Channel)
-	{
-		TargetOptions.Add(MakeShared<int32>(Channel));
-	}
-
-	auto Select = [](const TSharedPtr<SComboBox<TSharedPtr<int32>>>& Combo, const TArray<TSharedPtr<int32>>& Options, int32 Value)
-	{
-		if (Combo.IsValid())
-		{
-			Combo->RefreshOptions();
-			const TSharedPtr<int32>* Found = Options.FindByPredicate([Value](const TSharedPtr<int32>& Option) { return *Option == Value; });
-			Combo->SetSelectedItem(Found ? *Found : nullptr);
-		}
-	};
-	Select(SourceCombo, SourceOptions, Settings.SourceChannel);
-	Select(TargetCombo, TargetOptions, Settings.TargetChannel);
-	Select(BalancedTargetCombo, TargetOptions, Settings.BalancedTargetChannel);
+	return Channels;
 }
 
 /** "UV1", "UV1 (lightmap)", "UV2 (new)". */
@@ -685,22 +605,7 @@ TSharedRef<SWidget> SMenu_UVLayout::CreatePreviewPanel(bool bBalanced)
 }
 
 /** Picks the first Static or Skeletal Mesh selected in the Content Browser. */
-FReply SMenu_UVLayout::OnUseSelectionClicked()
-{
-	for (const FAssetData& Asset : VrrCore::GetSelectedAssets())
-	{
-		if (Asset.IsInstanceOf(UStaticMesh::StaticClass()) || Asset.IsInstanceOf(USkeletalMesh::StaticClass()))
-		{
-			SetMesh(Asset.GetAsset());
-			return FReply::Handled();
-		}
-	}
-
-	SetStatus(LOCTEXT("NoMeshSelected", "Select a Static Mesh or Skeletal Mesh in the Content Browser first."), true);
-	return FReply::Handled();
-}
-
-/** Writes the layout, then refreshes the channel list (it may have grown) and the preview. */
+/** Writes the layout, then re-reads the channel count (it may have grown) and refreshes the preview. */
 FReply SMenu_UVLayout::OnApplyClicked()
 {
 	if (!GetApplyBlocker().IsEmpty())
@@ -717,7 +622,6 @@ FReply SMenu_UVLayout::OnApplyClicked()
 	{
 		const FText Status = StatusText;
 		NumUVChannels = VrrCore::GetNumUVChannels(Mesh.Get());
-		RefreshChannelOptions();
 		UpdatePreviews();
 		SetStatus(Status, false);
 	}
@@ -756,7 +660,6 @@ FReply SMenu_UVLayout::OnCreateBalancedClicked()
 	if (Result.bSuccess)
 	{
 		NumUVChannels = VrrCore::GetNumUVChannels(Mesh.Get());
-		RefreshChannelOptions();
 		UpdatePreviews();
 	}
 	return FReply::Handled();

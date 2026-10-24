@@ -45,12 +45,7 @@ private:
 
 	FRebakeTextureSettings Settings;
 
-	// Combo box options
-	TArray<TSharedPtr<int32>> ChannelOptions;
-	TSharedPtr<SComboBox<TSharedPtr<int32>>> SourceCombo;
-	TSharedPtr<SComboBox<TSharedPtr<int32>>> TargetCombo;
-	TArray<TSharedPtr<int32>> ResolutionOptions;
-	TArray<TSharedPtr<int32>> SupersamplingOptions;
+	// Filter combo options
 	TArray<TSharedPtr<ERebakeFilter>> FilterOptions;
 
 	FText StatusText;
@@ -66,17 +61,16 @@ private:
 	FText GetResultCaption() const;
 	TSharedRef<SWidget> CreateCompressionSection();
 	TSharedRef<SWidget> CreateSaveSection();
-	TSharedRef<SWidget> CreateChannelCombo(TSharedPtr<SComboBox<TSharedPtr<int32>>>& OutCombo, int32* Value);
 
 	// Behavior
 	void SetMesh(UObject* NewMesh);
 	void SetTexture(UTexture2D* NewTexture);
+	/** Suggests <texture>_UV<target channel> as the output name. */
+	void RefreshOutputName();
 	FText GetMeshInfoText() const;
 	FText GetTextureInfoText() const;
 	/** Why Rebake can't run yet, or empty when it can. */
 	FText GetRebakeBlocker() const;
-	FReply OnUseSelectedMeshClicked();
-	FReply OnUseSelectedTextureClicked();
 	FReply OnCopySettingsClicked();
 	FReply OnRebakeClicked();
 	void SetStatus(const FText& Text, bool bError);
