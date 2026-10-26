@@ -66,6 +66,19 @@ namespace TexturePacker
 	/** A source shrunk so its longest side is at most MaxSize (for fast previews). Empty when it has no data. */
 	void ReadPreviewSource(UTexture2D* Source, int32 MaxSize, FImage& OutImage);
 
+	/** Channel bits for GetAvailableChannels: bit 0 = R, 1 = G, 2 = B, 3 = A. */
+	constexpr uint8 ChannelBit(int32 Channel) { return static_cast<uint8>(1u << Channel); }
+
+	/**
+	 * Which channels of a source hold data, as ChannelBit flags (0 when there is no texture).
+	 * Looks at the source format and compression settings, and at Preview (from ReadPreviewSource) to spot
+	 * gray images (R = G = B, so only R counts) and alpha that is fully opaque. OutNote says why channels are missing.
+	 */
+	uint8 GetAvailableChannels(const UTexture2D* Source, const FImage& Preview, FText& OutNote);
+
+	/** Short label for a channel mask: "RGBA", "RGB", "Grayscale", "Alpha"... Empty for 0. */
+	FText DescribeChannels(uint8 Mask);
+
 	/**
 	 * Preview pixels (BGRA8, opaque) at most MaxSize on the longest side, from sources made by ReadPreviewSource.
 	 * ViewChannel: INDEX_NONE for RGB, 0-3 to show one channel as grayscale. Returns false when nothing is used.

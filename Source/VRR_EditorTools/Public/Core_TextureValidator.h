@@ -10,7 +10,7 @@ class UTexture2D;
 /** Which texture checks to run. */
 struct FTextureValidatorSettings
 {
-	bool bCheckNaming = true;		// T_ prefix (VT_ for virtual textures) + known suffix
+	bool bCheckNaming = true;		// T_ prefix (VT_ virtual, VAT_ vertex animation, CA_ curve atlas) + known suffix
 	bool bCheckSettings = true;		// sRGB/compression match what the suffix says
 	bool bCheckResolution = true;	// power of two, no larger than MaxSize
 	bool bCheckMips = true;			// mips, streaming, normal map texture group
@@ -21,8 +21,8 @@ struct FTextureValidatorSettings
 
 /**
  * Checks texture assets against the project rules:
- * naming (T_ or VT_ prefix + known suffix), settings that match the suffix, resolution, mips/streaming,
- * and virtual texture requirements.
+ * naming (T_, VT_ or VAT_ prefix + known suffix), settings that match the suffix, resolution, mips/streaming,
+ * virtual texture and vertex animation texture requirements.
  * AssetValidation (Core_AssetValidation.h) finds the textures and runs this on each.
  */
 namespace TextureValidator

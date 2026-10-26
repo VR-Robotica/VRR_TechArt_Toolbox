@@ -3,8 +3,9 @@
 /*
  * Toolbox > Texture Packer page (UI only).
  *
- * The page edits an FTexturePackSettings (4 source slots, 4 output channels, output type) and shows a live
- * preview; TexturePacker (Core_TexturePacker.cpp) does the reading, packing and asset creation.
+ * The page edits an FTexturePackSettings (4 source slots, 4 output channels, output type) through the channel
+ * graph (Menu_TexturePackerGraph.cpp) and shows a live preview; TexturePacker (Core_TexturePacker.cpp) does the
+ * reading, packing and asset creation.
  * Preview: sources are shrunk once into PreviewSourceCache, so changing a channel only re-packs small images.
  */
 
@@ -13,53 +14,22 @@
 #include "Core_Common.h"
 #include "Engine/Texture2D.h"
 #include "MenuWidgets.h"
-#include "PropertyCustomizationHelpers.h"
+#include "Menu_TexturePackerGraph.h"
 #include "TextureResource.h"
-#include "ThumbnailRendering/ThumbnailManager.h"
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Input/SButton.h"
-#include "Widgets/Input/SCheckBox.h"
 #include "Widgets/Input/SComboBox.h"
 #include "Widgets/Input/SEditableTextBox.h"
 #include "Widgets/Input/SSegmentedControl.h"
-#include "Widgets/Input/SSpinBox.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
-#include "Widgets/Layout/SSeparator.h"
 #include "Widgets/Text/STextBlock.h"
 
 #define LOCTEXT_NAMESPACE "SMenu_TexturePacker"
 
-/** Tint per output channel (R, G, B, A) for the channel rows. */
-namespace TexturePackerUI
-{
-	const FLinearColor ChannelColors[4] =
-	{
-		FLinearColor(1.0f, 0.25f, 0.25f),
-		FLinearColor(0.3f, 1.0f, 0.3f),
-		FLinearColor(0.35f, 0.55f, 1.0f),
-		FLinearColor(0.85f, 0.85f, 0.85f)
-	};
-
-	// Channels grid columns, shared by the heading row and each channel row
-	constexpr float ChannelLabelWidth = 24.0f;	// "R" plus its gap
-	constexpr float ValueWidth = VrrMenu::NumberWidth;	// source channel combo or constant value
-	constexpr float InvertWidth = 44.0f;
-}
-
-/** Builds the page: sources and channels cards side by side, then output (with the Pack button) and preview. */
+/** Builds the page: the channel graph with the preview beside it, then the output settings (with the Pack button). */
 void SMenu_TexturePacker::Construct(const FArguments& InArgs)
 {
-	SourceOptions.Add(MakeShared<int32>(INDEX_NONE));
-	for (int32 i = 0; i < NumSources; ++i)
-	{
-		SourceOptions.Add(MakeShared<int32>(i));
-	}
-	for (int32 i = 0; i < NumChannels; ++i)
-	{
-		ChannelOptions.Add(MakeShared<int32>(i));
-	}
-
 	CompressionOptions.Add(MakeShared<FString>(TEXT("Masks (Recommended)")));
 	CompressionOptions.Add(MakeShared<FString>(TEXT("Grayscale")));
 	CompressionOptions.Add(MakeShared<FString>(TEXT("Diffuse")));
@@ -68,259 +38,54 @@ void SMenu_TexturePacker::Construct(const FArguments& InArgs)
 	PreviewBrush.DrawAs = ESlateBrushDrawType::Image;
 	PreviewBrush.ImageSize = FVector2D(PreviewMaxSize, PreviewMaxSize);
 
-	// Source textures, one picker per slot
-	TArray<TSharedRef<SWidget>> SourceRows;
-	for (int32 i = 0; i < NumSources; ++i)
-	{
-		SourceRows.Add(CreateSourceRow(i));
-	}
-
-	// Output channels: a heading row, then one row per channel
-	auto Heading = [](const FText& Text) { return SNew(STextBlock).Text(Text).Font(VrrMenu::HelpFont()).ColorAndOpacity(FSlateColor::UseSubduedForeground()); };
-	TArray<TSharedRef<SWidget>> ChannelRows;
-	ChannelRows.Add(SNew(SHorizontalBox)
-		+ SHorizontalBox::Slot().AutoWidth()
-		[
-			SNew(SBox).WidthOverride(TexturePackerUI::ChannelLabelWidth)
-		]
-		+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(0.0f, 0.0f, 6.0f, 0.0f)
-		[
-			Heading(LOCTEXT("SourceHeading", "Source"))
-		]
-		+ SHorizontalBox::Slot().AutoWidth().Padding(0.0f, 0.0f, 6.0f, 0.0f)
-		[
-			SNew(SBox).WidthOverride(TexturePackerUI::ValueWidth)
-			[
-				Heading(LOCTEXT("ValueHeading", "Channel / Value"))
-			]
-		]
-		+ SHorizontalBox::Slot().AutoWidth()
-		[
-			SNew(SBox).WidthOverride(TexturePackerUI::InvertWidth).HAlign(HAlign_Center)
-			[
-				Heading(LOCTEXT("InvertHeading", "Invert"))
-			]
-		]);
-	for (int32 i = 0; i < NumChannels; ++i)
-	{
-		ChannelRows.Add(CreateChannelRow(i));
-	}
-
-	// Two cards next to each other: the left one fills, the right one takes RightFill times as much (0 = its own width)
-	auto SideBySide = [](const TSharedRef<SWidget>& Left, const TSharedRef<SWidget>& Right, float RightFill) -> TSharedRef<SWidget>
-	{
-		TSharedRef<SHorizontalBox> Box = SNew(SHorizontalBox)
-			+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(0.0f, 0.0f, VrrMenu::CardGap, 0.0f)
-			[
-				Left
-			];
-		if (RightFill > 0.0f)
-		{
-			Box->AddSlot().FillWidth(RightFill)[Right];
-		}
-		else
-		{
-			Box->AddSlot().AutoWidth()[Right];
-		}
-		return Box;
-	};
-
 	ChildSlot
 	[
 		VrrMenu::Stack({
-			SideBySide(
-				VrrMenu::Card(LOCTEXT("SourcesHeader", "Source Textures"), VrrMenu::Rows(SourceRows)),
-				VrrMenu::Card(LOCTEXT("ChannelsHeader", "Channels"), VrrMenu::Rows(ChannelRows)),
-				1.3f),
-			SideBySide(
-				VrrMenu::Card(LOCTEXT("TargetHeader", "Output"),
-					SNew(SVerticalBox)
-					+ SVerticalBox::Slot().AutoHeight()
-					[
-						CreateOutputSettings()
-					]
-					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 16.0f, 0.0f, 0.0f)
-					[
-						VrrMenu::ActionButton(LOCTEXT("PackButton", "Create Packed Texture"),
-							LOCTEXT("PackButtonTip", "Create a new texture asset from the selected channels"),
-							[this]() { return GetPackBlocker(); },
-							FOnClicked::CreateSP(this, &SMenu_TexturePacker::OnPackClicked))
-					]),
-				VrrMenu::Card(LOCTEXT("PreviewHeader", "Preview"), CreatePreview()),
-				0.0f),
+			// Graph and preview side by side, so the Output node sits right next to the result
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.FillWidth(1.0f)
+			.Padding(0.0f, 0.0f, VrrMenu::CardGap, 0.0f)
+			[
+				VrrMenu::HelpCard(LOCTEXT("ChannelsHeader", "Channels"),
+					LOCTEXT("ChannelsHelp", "Pick up to four textures, then drag from a texture's channel pin to an Output channel pin. "
+						"A texture only shows pins for the channels it has: grayscale images only R, color images R, G and B, and A when it has alpha data. "
+						"One channel can feed several outputs. Alt+click or right-click a pin to break its wires; an output without a wire uses its constant value."),
+					CreateGraph())
+			]
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			[
+				VrrMenu::Card(LOCTEXT("PreviewHeader", "Preview"), CreatePreview())
+			],
+			VrrMenu::Card(LOCTEXT("TargetHeader", "Output"),
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					CreateOutputSettings()
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 16.0f, 0.0f, 0.0f)
+				[
+					VrrMenu::ActionButton(LOCTEXT("PackButton", "Create Packed Texture"),
+						LOCTEXT("PackButtonTip", "Create a new texture asset from the wired channels"),
+						[this]() { return GetPackBlocker(); },
+						FOnClicked::CreateSP(this, &SMenu_TexturePacker::OnPackClicked))
+				]),
 		})
 	];
 }
 
 // LAYOUT
-/** Texture picker for one source slot. */
-TSharedRef<SWidget> SMenu_TexturePacker::CreateSourceRow(int32 SourceIndex)
+/** Source texture nodes wired into the output node (STexturePackerGraph). */
+TSharedRef<SWidget> SMenu_TexturePacker::CreateGraph()
 {
-	return SNew(SHorizontalBox)
-
-	+ SHorizontalBox::Slot()
-	.AutoWidth()
-	.VAlign(VAlign_Center)
-	.Padding(0.0f, 0.0f, 8.0f, 0.0f)
-	[
-		SNew(STextBlock)
-		.Text(FText::AsNumber(SourceIndex + 1))
-		.MinDesiredWidth(16.0f)
-	]
-
-	+ SHorizontalBox::Slot()
-	.FillWidth(1.0f)
-	[
-		SNew(SObjectPropertyEntryBox)
-		.AllowedClass(UTexture2D::StaticClass())
-		.ObjectPath_Lambda([this, SourceIndex]()
-		{
-			return Settings.Sources[SourceIndex].IsValid() ? Settings.Sources[SourceIndex]->GetPathName() : FString();
-		})
-		.OnObjectChanged_Lambda([this, SourceIndex](const FAssetData& AssetData)
-		{
-			Settings.Sources[SourceIndex] = Cast<UTexture2D>(AssetData.GetAsset());
-			OnSourcesChanged();
-		})
-		.AllowClear(true)
-		.DisplayThumbnail(true)
-		.ThumbnailPool(UThumbnailManager::Get().GetSharedThumbnailPool())
-	];
-}
-
-/** One output channel: which source and which of its channels, invert, and the constant used when no source is picked. */
-TSharedRef<SWidget> SMenu_TexturePacker::CreateChannelRow(int32 ChannelIndex)
-{
-	FPackedChannel* Channel = &Settings.Channels[ChannelIndex];
-
-	return SNew(SHorizontalBox)
-	.IsEnabled_Lambda([this, ChannelIndex]() { return Settings.IsChannelEnabled(ChannelIndex); })
-	.ToolTipText_Lambda([this, ChannelIndex]()
-	{
-		return Settings.IsChannelEnabled(ChannelIndex)
-			? FText::GetEmpty()
-			: FText::Format(LOCTEXT("ChannelDisabledTip", "{0} compression doesn't use this channel"), GetCompressionText());
-	})
-
-	// Output channel label
-	+ SHorizontalBox::Slot()
-	.AutoWidth()
-	.VAlign(VAlign_Center)
-	[
-		SNew(SBox)
-		.WidthOverride(TexturePackerUI::ChannelLabelWidth)
-		[
-			SNew(STextBlock)
-			.Text(GetChannelName(ChannelIndex))
-			.ColorAndOpacity(TexturePackerUI::ChannelColors[ChannelIndex])
-			.Font(FAppStyle::GetFontStyle("BoldFont"))
-		]
-	]
-
-	// Source texture
-	+ SHorizontalBox::Slot()
-	.FillWidth(1.0f)
-	.Padding(0.0f, 0.0f, 6.0f, 0.0f)
-	[
-		SNew(SComboBox<TSharedPtr<int32>>)
-		.OptionsSource(&SourceOptions)
-		.InitiallySelectedItem(SourceOptions[0])
-		.OnGenerateWidget_Lambda([this](TSharedPtr<int32> Option)
-		{
-			return SNew(STextBlock).Text(GetSourceOptionText(*Option));
-		})
-		.OnSelectionChanged_Lambda([this, Channel](TSharedPtr<int32> Option, ESelectInfo::Type)
-		{
-			if (Option.IsValid())
-			{
-				Channel->SourceIndex = *Option;
-				UpdatePreview();
-			}
-		})
-		[
-			SNew(STextBlock)
-			.Text_Lambda([this, Channel]() { return GetSourceOptionText(Channel->SourceIndex); })
-		]
-	]
-
-	// Source channel (only when a texture is picked)
-	+ SHorizontalBox::Slot()
-	.AutoWidth()
-	.Padding(0.0f, 0.0f, 6.0f, 0.0f)
-	[
-		SNew(SBox)
-		.WidthOverride(TexturePackerUI::ValueWidth)
-		.Visibility_Lambda([Channel]() { return Channel->SourceIndex != INDEX_NONE ? EVisibility::Visible : EVisibility::Collapsed; })
-		[
-			SNew(SComboBox<TSharedPtr<int32>>)
-			.OptionsSource(&ChannelOptions)
-			.InitiallySelectedItem(ChannelOptions[0])
-			.ToolTipText(LOCTEXT("SourceChannelTip", "Which channel of the source texture to copy"))
-			.OnGenerateWidget_Lambda([](TSharedPtr<int32> Option)
-			{
-				return SNew(STextBlock)
-					.Text(GetChannelName(*Option))
-					.ColorAndOpacity(TexturePackerUI::ChannelColors[*Option]);
-			})
-			.OnSelectionChanged_Lambda([this, Channel](TSharedPtr<int32> Option, ESelectInfo::Type)
-			{
-				if (Option.IsValid())
-				{
-					Channel->SourceChannel = *Option;
-					UpdatePreview();
-				}
-			})
-			[
-				SNew(STextBlock)
-				.Text_Lambda([Channel]() { return GetChannelName(Channel->SourceChannel); })
-				.ColorAndOpacity_Lambda([Channel]() { return FSlateColor(TexturePackerUI::ChannelColors[Channel->SourceChannel]); })
-				.MinDesiredWidth(16.0f)
-			]
-		]
-	]
-
-	// Constant value (only when no texture is picked)
-	+ SHorizontalBox::Slot()
-	.AutoWidth()
-	.Padding(0.0f, 0.0f, 6.0f, 0.0f)
-	[
-		SNew(SBox)
-		.WidthOverride(TexturePackerUI::ValueWidth)
-		.Visibility_Lambda([Channel]() { return Channel->SourceIndex == INDEX_NONE ? EVisibility::Visible : EVisibility::Collapsed; })
-		[
-			SNew(SSpinBox<float>)
-			.MinValue(0.0f)
-			.MaxValue(1.0f)
-			.Delta(0.01f)
-			.ToolTipText(LOCTEXT("DefaultValueTip", "Constant value used when no source texture is picked"))
-			.Value_Lambda([Channel]() { return Channel->DefaultValue; })
-			.OnValueChanged_Lambda([this, Channel](float NewValue)
-			{
-				Channel->DefaultValue = NewValue;
-				UpdatePreview();
-			})
-		]
-	]
-
-	// Invert (centered under its heading)
-	+ SHorizontalBox::Slot()
-	.AutoWidth()
-	.VAlign(VAlign_Center)
-	[
-		SNew(SBox)
-		.WidthOverride(TexturePackerUI::InvertWidth)
-		.HAlign(HAlign_Center)
-		[
-			SNew(SCheckBox)
-			.ToolTipText(LOCTEXT("InvertTip", "Invert this channel (1 - value)"))
-			.IsChecked_Lambda([Channel]() { return Channel->bInvert ? ECheckBoxState::Checked : ECheckBoxState::Unchecked; })
-			.OnCheckStateChanged_Lambda([this, Channel](ECheckBoxState State)
-			{
-				Channel->bInvert = State == ECheckBoxState::Checked;
-				UpdatePreview();
-			})
-		]
-	];
+	return SNew(STexturePackerGraph)
+		.Settings(&Settings)
+		.SourceChannels(SourceChannels)
+		.SourceNotes(SourceNotes)
+		.CompressionText_Lambda([this]() { return GetCompressionText(); })
+		.OnSourcesChanged([this]() { OnSourcesChanged(); })
+		.OnChannelsChanged([this]() { UpdatePreview(); });
 }
 
 /** Output name, folder and type (compression). */
@@ -448,25 +213,6 @@ TSharedRef<SWidget> SMenu_TexturePacker::CreatePreview()
 }
 
 // LABELS
-/** "2: T_Rock_R", or "None (constant value)". */
-FText SMenu_TexturePacker::GetSourceOptionText(int32 SourceIndex) const
-{
-	if (SourceIndex == INDEX_NONE)
-	{
-		return LOCTEXT("NoSource", "None (constant value)");
-	}
-
-	const FString TextureName = Settings.Sources[SourceIndex].IsValid() ? Settings.Sources[SourceIndex]->GetName() : TEXT("(empty)");
-	return FText::FromString(FString::Printf(TEXT("%d: %s"), SourceIndex + 1, *TextureName));
-}
-
-/** R, G, B or A. */
-FText SMenu_TexturePacker::GetChannelName(int32 ChannelIndex)
-{
-	static const FText Names[4] = { INVTEXT("R"), INVTEXT("G"), INVTEXT("B"), INVTEXT("A") };
-	return Names[FMath::Clamp(ChannelIndex, 0, 3)];
-}
-
 /** Display name of the chosen output type. */
 FText SMenu_TexturePacker::GetCompressionText() const
 {
@@ -527,13 +273,24 @@ void SMenu_TexturePacker::OnSourcesChanged()
 }
 
 // PREVIEW
-/** Re-reads the small preview copy of every source, then updates the preview. */
+/** Re-reads the small preview copy and the channels of every source, then updates the preview. */
 void SMenu_TexturePacker::RefreshPreviewSources()
 {
-	// Shrink each source once so preview updates stay fast with large textures
+	// Shrink each source once so preview updates stay fast with large textures,
+	// and see which channels it has (the small copy is enough to spot gray images and empty alpha)
 	for (int32 i = 0; i < NumSources; ++i)
 	{
 		TexturePacker::ReadPreviewSource(Settings.Sources[i].Get(), PreviewMaxSize, PreviewSourceCache[i]);
+		SourceChannels[i] = TexturePacker::GetAvailableChannels(Settings.Sources[i].Get(), PreviewSourceCache[i], SourceNotes[i]);
+	}
+
+	// Drop wires from channels a (new or cleared) texture doesn't have
+	for (FPackedChannel& Channel : Settings.Channels)
+	{
+		if (Channel.SourceIndex != INDEX_NONE && (SourceChannels[Channel.SourceIndex] & TexturePacker::ChannelBit(Channel.SourceChannel)) == 0)
+		{
+			Channel.SourceIndex = INDEX_NONE;
+		}
 	}
 
 	UpdatePreview();

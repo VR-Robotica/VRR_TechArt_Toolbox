@@ -154,6 +154,133 @@ namespace TexturePacker
 			OutImage);
 	}
 
+	/** True when every pixel of a BGRA8 image has (almost) equal R, G and B. */
+	static bool IsGrayImage(const FImage& Image)
+	{
+		if (Image.Format != ERawImageFormat::BGRA8 || Image.RawData.IsEmpty())
+		{
+			return false;
+		}
+
+		// A little slack for JPEG noise in gray images saved as color
+		constexpr int32 Tolerance = 2;
+		const uint8* Data = Image.RawData.GetData();
+		const int64 NumPixels = Image.GetNumPixels();
+		for (int64 Pixel = 0; Pixel < NumPixels; ++Pixel)
+		{
+			const uint8* P = Data + Pixel * 4;
+			if (FMath::Abs(P[0] - P[2]) > Tolerance || FMath::Abs(P[1] - P[2]) > Tolerance)
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
+	/**
+	 * Channels a source really has:
+	 *  1. single-channel source formats (G8, G16, R16F, R32F) only have R,
+	 *  2. single-channel compressions keep only R (Grayscale, Alpha, Half/Single Float) or only A (Displacement, Distance Field Font),
+	 *  3. otherwise R, G, B, reduced to R when the image is gray,
+	 *  4. plus A when the format and compression keep alpha and it isn't fully opaque.
+	 */
+	uint8 GetAvailableChannels(const UTexture2D* Source, const FImage& Preview, FText& OutNote)
+	{
+		OutNote = FText::GetEmpty();
+		if (!Source || !Source->Source.IsValid())
+		{
+			return 0;
+		}
+
+		const uint8 R = ChannelBit(0);
+		const uint8 RGB = ChannelBit(0) | ChannelBit(1) | ChannelBit(2);
+		const uint8 A = ChannelBit(3);
+
+		// 1. Single-channel source data
+		const ETextureSourceFormat Format = Source->Source.GetFormat();
+		if (Format == TSF_G8 || Format == TSF_G16 || Format == TSF_R16F || Format == TSF_R32F)
+		{
+			OutNote = LOCTEXT("NoteSingleChannelSource", "Single-channel (grayscale) source image: only R");
+			return R;
+		}
+
+		// 2. Single-channel compression
+		const TextureCompressionSettings Compression = Source->CompressionSettings;
+		switch (Compression)
+		{
+		case TC_Grayscale:
+		case TC_Alpha:
+		case TC_HalfFloat:
+		case TC_SingleFloat:
+			OutNote = LOCTEXT("NoteSingleChannelCompression", "Its compression keeps only the R channel");
+			return R;
+		case TC_Displacementmap:
+		case TC_DistanceFieldFont:
+			OutNote = LOCTEXT("NoteAlphaCompression", "Its compression keeps only the A channel");
+			return A;
+		default:
+			break;
+		}
+
+		// 3. Color channels, or R alone for a gray image
+		uint8 Mask = RGB;
+		TArray<FText> Notes;
+		if (IsGrayImage(Preview))
+		{
+			Mask = R;
+			Notes.Add(LOCTEXT("NoteGrayImage", "R, G and B are equal (grayscale image): only R"));
+		}
+
+		// 4. Alpha
+		if (Format == TSF_BGRE8)
+		{
+			Notes.Add(LOCTEXT("NoteNoAlphaFormat", "No alpha channel in the source image"));
+		}
+		else if (Compression == TC_Normalmap || Compression == TC_HDR_Compressed)
+		{
+			Notes.Add(LOCTEXT("NoteNoAlphaCompression", "Its compression has no alpha"));
+		}
+		else if (Source->CompressionNoAlpha)
+		{
+			Notes.Add(LOCTEXT("NoteCompressionNoAlpha", "Compression No Alpha is on"));
+		}
+		else if (!Preview.RawData.IsEmpty() && !FImageCore::DetectAlphaChannel(Preview))
+		{
+			Notes.Add(LOCTEXT("NoteOpaqueAlpha", "Alpha is fully opaque (no alpha data)"));
+		}
+		else
+		{
+			Mask |= A;
+		}
+
+		OutNote = FText::Join(INVTEXT("\n"), Notes);
+		return Mask;
+	}
+
+	/** "RGBA", "RGB", "Grayscale", "Alpha", or the letters of whatever is set. */
+	FText DescribeChannels(uint8 Mask)
+	{
+		if (Mask == ChannelBit(0))
+		{
+			return LOCTEXT("ChannelsGray", "Grayscale");
+		}
+		if (Mask == ChannelBit(3))
+		{
+			return LOCTEXT("ChannelsAlpha", "Alpha");
+		}
+
+		static const TCHAR* Letters[4] = { TEXT("R"), TEXT("G"), TEXT("B"), TEXT("A") };
+		FString Text;
+		for (int32 Channel = 0; Channel < 4; ++Channel)
+		{
+			if (Mask & ChannelBit(Channel))
+			{
+				Text += Letters[Channel];
+			}
+		}
+		return FText::FromString(Text);
+	}
+
 	/**
 	 * Preview pixels for the page:
 	 *  1. scale the output size down to MaxSize, keeping its aspect ratio,

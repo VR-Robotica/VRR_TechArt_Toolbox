@@ -211,11 +211,11 @@ namespace VatBakerImpl
 		FString LODMesh(int32 LOD) const		{ return TEXT("SM_") + BaseName + LODSuffix(LOD); }
 		FString CombinedMesh() const			{ return TEXT("SM_") + BaseName; }
 		FString BaseMaterial() const			{ return TEXT("MI_") + BaseName; }
-		FString BonePosition() const			{ return TEXT("T_") + BaseName + TEXT("_BonePos"); }
-		FString BoneRotation() const			{ return TEXT("T_") + BaseName + TEXT("_BoneRot"); }
-		FString BoneWeights(int32 LOD) const	{ return TEXT("T_") + BaseName + TEXT("_BoneWeights") + LODSuffix(LOD); }
-		FString VertexPosition(int32 LOD) const	{ return TEXT("T_") + BaseName + TEXT("_VertexPos") + LODSuffix(LOD); }
-		FString VertexNormal(int32 LOD) const	{ return TEXT("T_") + BaseName + TEXT("_VertexNormal") + LODSuffix(LOD); }
+		FString BonePosition() const			{ return TEXT("VAT_") + BaseName + TEXT("_BonePos"); }
+		FString BoneRotation() const			{ return TEXT("VAT_") + BaseName + TEXT("_BoneRot"); }
+		FString BoneWeights(int32 LOD) const	{ return TEXT("VAT_") + BaseName + TEXT("_BoneWeights") + LODSuffix(LOD); }
+		FString VertexPosition(int32 LOD) const	{ return TEXT("VAT_") + BaseName + TEXT("_VertexPos") + LODSuffix(LOD); }
+		FString VertexNormal(int32 LOD) const	{ return TEXT("VAT_") + BaseName + TEXT("_VertexNormal") + LODSuffix(LOD); }
 
 		TArray<FString> All() const
 		{
@@ -301,7 +301,7 @@ namespace VatBakerImpl
 		}
 	}
 
-	/** An empty (1x1) texture with the settings AnimToTexture writes with; the plugin replaces its pixels when baking. */
+	/** An empty (1x1) VAT texture: linear, Nearest, no mips, HDR. The plugin replaces its pixels when baking. */
 	UTexture2D* CreateVatTexture(const FString& Folder, const FString& Name)
 	{
 		UPackage* Package = CreatePackage(*(Folder / Name));
@@ -312,13 +312,37 @@ namespace VatBakerImpl
 		Texture->Source.Init(1, 1, 1, 1, TSF_BGRA8, reinterpret_cast<const uint8*>(&Black));
 		Texture->SRGB = false;
 		Texture->Filter = TF_Nearest;
-		Texture->CompressionSettings = TC_VectorDisplacementmap;
+		Texture->CompressionSettings = TC_HDR;	// the plugin resets this when baking; UseHDRCompression sets it again after
 		Texture->MipGenSettings = TMGS_NoMipmaps;
 		Texture->PostEditChange();
 
 		FAssetRegistryModule::AssetCreated(Texture);
 		Package->MarkPackageDirty();
 		return Texture;
+	}
+
+	/**
+	 * Sets HDR compression on a baked set's textures, as the Texture Validator expects for VAT_ textures.
+	 * The plugin writes 8-bit bakes as Vector Displacement (RGBA8) and 16-bit ones as HDR; the 8-bit values
+	 * come through unchanged as 16-bit floats, so the material reads the same data.
+	 */
+	void UseHDRCompression(UAnimToTextureDataAsset* DataAsset)
+	{
+		const TArray<UTexture2D*> Textures =
+		{
+			DataAsset->GetBonePositionTexture(), DataAsset->GetBoneRotationTexture(), DataAsset->GetBoneWeightTexture(),
+			DataAsset->GetVertexPositionTexture(), DataAsset->GetVertexNormalTexture()
+		};
+		for (UTexture2D* Texture : Textures)
+		{
+			if (Texture && Texture->CompressionSettings != TC_HDR)
+			{
+				Texture->PreEditChange(nullptr);
+				Texture->CompressionSettings = TC_HDR;
+				Texture->PostEditChange();
+				Texture->MarkPackageDirty();
+			}
+		}
 	}
 
 	/**
@@ -998,6 +1022,7 @@ namespace VatBaker
 				Result.Message = FText::Format(LOCTEXT("BakeFailed", "Baking LOD {0} failed. LogAnimToTextureEditor in the Output Log says why."), LOD);
 				return Result;
 			}
+			UseHDRCompression(DataAssets[LOD]);
 			Result.Assets.Add(DataAssets[LOD]);
 		}
 

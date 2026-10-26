@@ -13,8 +13,8 @@
 class UTexture2D;
 
 /**
- * Toolbox "Packer" page: pick up to four textures and choose which of their channels go into the
- * R, G, B and A of a new texture. The packing itself is in TexturePacker (Core_TexturePacker.h).
+ * Toolbox "Packer" page: pick up to four textures and wire their channels into the R, G, B and A of a
+ * new texture in a material-graph style view (STexturePackerGraph). The packing itself is in TexturePacker (Core_TexturePacker.h).
  */
 class SMenu_TexturePacker : public SCompoundWidget
 {
@@ -34,9 +34,11 @@ private:
 	// Inputs
 	FTexturePackSettings Settings;
 
+	// What each source slot holds: TexturePacker::ChannelBit flags, and why channels are missing
+	uint8 SourceChannels[NumSources] = {};
+	FText SourceNotes[NumSources];
+
 	// Combo box options
-	TArray<TSharedPtr<int32>> SourceOptions;	// INDEX_NONE, 0..NumSources-1
-	TArray<TSharedPtr<int32>> ChannelOptions;	// 0..3
 	TArray<TSharedPtr<FString>> CompressionOptions;	// same order as ETexturePackCompression
 
 	// Output settings
@@ -53,15 +55,12 @@ private:
 	FIntPoint OutputSize = FIntPoint::ZeroValue;
 
 	// Layout
-	TSharedRef<SWidget> CreateSourceRow(int32 SourceIndex);
-	TSharedRef<SWidget> CreateChannelRow(int32 ChannelIndex);
+	TSharedRef<SWidget> CreateGraph();
 	TSharedRef<SWidget> CreateOutputSettings();
 	TSharedRef<SWidget> CreatePreview();
 
 	// Labels
-	FText GetSourceOptionText(int32 SourceIndex) const;
 	FText GetCompressionText() const;
-	static FText GetChannelName(int32 ChannelIndex);
 
 	// Behavior
 	/** Why Pack can't run yet, or empty when it can. */
