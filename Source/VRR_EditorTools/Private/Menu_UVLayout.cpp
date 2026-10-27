@@ -5,6 +5,10 @@
  *
  * The page edits an FUVLayoutSettings, shows a preview of the LOD 0 layout, and hands the settings to
  * UVLayout::Apply (Core_UVLayout.cpp), which writes the channel into the mesh.
+ *
+ * Cards: General Settings (mesh, source channel, shared options), Balanced UV Layout, Grouped Material UV Layout,
+ * Texel Density (rescale a channel in place to a real-world size). All the UV math lives in Core_UVLayout.cpp;
+ * this file only keeps the settings, the cached density measurement and the previews in step with the mesh.
  */
 
 #include "Menu_UVLayout.h"
@@ -30,6 +34,7 @@
 /**
  * Draws a UV layout: the 0-1 square, one tinted region per material slot with its name, the triangles filled
  * in the region's color, and island outlines. Fills and outlines are one custom-vertex draw each, so large meshes stay fast.
+ * UDIM and tiled (texel density) previews zoom out to every tile they cover; tiled ones outline the 0-1 tile.
  */
 class SUVLayoutPreview : public SLeafWidget
 {
@@ -54,10 +59,10 @@ public:
 		const float Side = FMath::Min(Size.X, Size.Y);
 		const FSlateBrush* White = FAppStyle::GetBrush("WhiteBrush");
 
-		// The area shown: the 0-1 square, or every UDIM tile (scaled down to fit, aspect kept)
+		// 1. The area shown: the 0-1 square, or every UDIM / tiled tile (scaled down to fit, aspect kept)
 		FBox2f View(FVector2f(0.0f), FVector2f(1.0f));
 		const bool bHasPreview = Preview.IsValid() && !Preview->IsEmpty();
-		if (bHasPreview && Preview->bUDIM)
+		if (bHasPreview && (Preview->bUDIM || Preview->bTiled))
 		{
 			for (const FBox2f& Region : Preview->Regions)
 			{
@@ -69,20 +74,31 @@ public:
 		const FVector2f ViewMin = View.Min;
 		auto ToLocal = [Zoom, ViewMin](const FVector2f& UV) { return (UV - ViewMin) * Zoom; };
 
-		// The backdrop, with a faint quarter grid in every unit tile
+		// 2. The backdrop, with a grid: quarter lines in every unit tile, or only tile lines once the view spans
+		//    more than 4 tiles (quarter lines would turn into a solid wash)
 		FSlateDrawElement::MakeBox(OutDrawElements, LayerId, Geometry.ToPaintGeometry(ViewSize * Zoom, FSlateLayoutTransform()),
 			White, ESlateDrawEffect::None, FLinearColor(0.012f, 0.012f, 0.014f, 1.0f));
-		for (int32 i = 1; i < FMath::RoundToInt32(ViewSize.X * 4.0f); ++i)
+		const int32 Steps = FMath::Max(ViewSize.X, ViewSize.Y) > 4.0f ? 1 : 4;
+		for (int32 i = 1; i < FMath::RoundToInt32(ViewSize.X * Steps); ++i)
 		{
-			const float T = Zoom * i / 4.0f;
+			const float T = Zoom * i / Steps;
 			FSlateDrawElement::MakeLines(OutDrawElements, LayerId + 1, Geometry.ToPaintGeometry(), TArray<FVector2f>{ FVector2f(T, 0.0f), FVector2f(T, ViewSize.Y * Zoom) },
-				ESlateDrawEffect::None, FLinearColor(1.0f, 1.0f, 1.0f, i % 4 == 0 ? 0.2f : 0.06f), false);
+				ESlateDrawEffect::None, FLinearColor(1.0f, 1.0f, 1.0f, i % Steps == 0 ? 0.2f : 0.06f), false);
 		}
-		for (int32 i = 1; i < FMath::RoundToInt32(ViewSize.Y * 4.0f); ++i)
+		for (int32 i = 1; i < FMath::RoundToInt32(ViewSize.Y * Steps); ++i)
 		{
-			const float T = Zoom * i / 4.0f;
+			const float T = Zoom * i / Steps;
 			FSlateDrawElement::MakeLines(OutDrawElements, LayerId + 1, Geometry.ToPaintGeometry(), TArray<FVector2f>{ FVector2f(0.0f, T), FVector2f(ViewSize.X * Zoom, T) },
-				ESlateDrawEffect::None, FLinearColor(1.0f, 1.0f, 1.0f, i % 4 == 0 ? 0.2f : 0.06f), false);
+				ESlateDrawEffect::None, FLinearColor(1.0f, 1.0f, 1.0f, i % Steps == 0 ? 0.2f : 0.06f), false);
+		}
+		// 2a. Tiled: outline the 0-1 tile (once more than one tile shows), so it's clear how far the UVs run past it
+		if (bHasPreview && Preview->bTiled && (ViewSize.X > 1.01f || ViewSize.Y > 1.01f))
+		{
+			const FVector2f A = ToLocal(FVector2f(0.0f));
+			const FVector2f B = ToLocal(FVector2f(1.0f));
+			FSlateDrawElement::MakeLines(OutDrawElements, LayerId + 5, Geometry.ToPaintGeometry(),
+				TArray<FVector2f>{ A, FVector2f(B.X, A.Y), B, FVector2f(A.X, B.Y), A },
+				ESlateDrawEffect::None, FLinearColor(1.0f, 0.85f, 0.3f, 0.9f), false, 1.5f);
 		}
 
 		if (!bHasPreview)
@@ -97,7 +113,7 @@ public:
 			return FSlateVertex::Make<ESlateVertexRounding::Disabled>(Transform, Position, FVector2f::ZeroVector, Color);
 		};
 
-		// Regions: faint fill and outline
+		// 3. Regions: faint fill and outline
 		for (int32 Region = 0; Region < Preview->Regions.Num(); ++Region)
 		{
 			const FBox2f& Box = Preview->Regions[Region];
@@ -113,7 +129,7 @@ public:
 			}
 		}
 
-		// Triangles, filled in their region's color
+		// 4. Triangles, filled in their region's color (tiled: one color per island)
 		TArray<FSlateVertex> Vertices;
 		TArray<SlateIndex> Indices;
 		Vertices.Reserve(Preview->Triangles.Num());
@@ -129,7 +145,7 @@ public:
 		}
 		FSlateDrawElement::MakeCustomVerts(OutDrawElements, LayerId + 3, Handle, Vertices, Indices, nullptr, 0, 0);
 
-		// Island outlines: each segment as a thin quad
+		// 5. Island outlines: each segment as a thin quad
 		Vertices.Reset();
 		Indices.Reset();
 		const FColor OutlineColor = FLinearColor(1.0f, 1.0f, 1.0f, 0.8f).ToFColor(true);
@@ -151,7 +167,7 @@ public:
 			FSlateDrawElement::MakeCustomVerts(OutDrawElements, LayerId + 4, Handle, Vertices, Indices, nullptr, 0, 0);
 		}
 
-		// Region names (and UDIM tile numbers)
+		// 6. Region names (and UDIM tile numbers)
 		if (Preview->Regions.Num() > 1 || Preview->bUDIM)
 		{
 			const FSlateFontInfo Font = FCoreStyle::GetDefaultFontStyle("Regular", 8);
@@ -167,7 +183,7 @@ public:
 					Label, Font, ESlateDrawEffect::None, RegionColor(Region));
 			}
 		}
-		return LayerId + 5;
+		return LayerId + 6;
 	}
 
 private:
@@ -182,7 +198,7 @@ private:
 	}
 };
 
-/** Builds the page: general settings (full width), then the balanced and grouped layouts (settings | preview). */
+/** Builds the page: general settings (full width), then one row per section: [settings card] [preview card]. */
 void SMenu_UVLayout::Construct(const FArguments& InArgs)
 {
 	PackMethodOptions.Add(MakeShared<EUVPackMethod>(EUVPackMethod::Shapes));
@@ -194,6 +210,7 @@ void SMenu_UVLayout::Construct(const FArguments& InArgs)
 			CreateGeneralSection(),
 			CreateBalancedSection(),
 			CreateGroupedSection(),
+			CreateDensitySection(),
 		})
 	];
 }
@@ -250,8 +267,45 @@ TSharedRef<SWidget> SMenu_UVLayout::CreateGeneralSection()
 }
 
 /**
+ * Texel density: rescale an existing channel in place so one UV tile covers a set distance. Settings card (a line
+ * comparing the target with the mesh's current density, and the button), then the preview card of the result.
+ */
+TSharedRef<SWidget> SMenu_UVLayout::CreateDensitySection()
+{
+	TSharedRef<SWidget> SettingsCard = VrrMenu::HelpCard(LOCTEXT("DensityHeader", "Texel Density"),
+		LOCTEXT("DensityHelp", "Scale a UV channel so textures show at a set real-world size, e.g. a 512 px texture covering 0.5 m, or 1024 px covering 1 m (both 1024 px/m). "
+			"Islands keep their place and shape and only change size, so UVs may run past 0-1: meant for tiling textures on the texturing channel (UV0), not for baking or lightmaps."),
+		VrrMenu::Rows({
+			VrrMenu::Row(LOCTEXT("DensityChannel", "UVs"),
+				VrrMenu::IntCombo(
+					[this]() { return GetChannelOptions(false); },
+					&Settings.DensityChannel,
+					[this](int32 Channel) { return GetChannelLabel(Channel, false); },
+					[this](int32) { RefreshDensityInfo(); UpdatePreview(EUVPreview::Density); }),
+				LOCTEXT("DensityChannelTip", "The channel scaled in place. Usually UV0, the texturing channel")),
+			VrrMenu::Row(LOCTEXT("DensityTexture", "Texture size"),
+				VrrMenu::ResolutionCombo(&Settings.DensityTextureSize, { 128, 256, 512, 1024, 2048, 4096 }),
+				LOCTEXT("DensityTextureTip", "The texture that tiles over these UVs (one UV tile = the whole texture)")),
+			VrrMenu::Row(LOCTEXT("DensityMeters", "Covers (m)"),
+				VrrMenu::FloatField(&Settings.DensityMeters, 0.01f, 100.0f, 0.05f),
+				LOCTEXT("DensityMetersTip", "How many meters one copy of the texture covers on the surface")),
+			VrrMenu::Row(LOCTEXT("DensityMode", "Islands"),
+				VrrMenu::CheckBox(&Settings.bDensityPerIsland, LOCTEXT("DensityPerIsland", "Even out every island"),
+					LOCTEXT("DensityPerIslandTip", "On: every island is scaled to exactly the target, so the texture is the same size everywhere.\n"
+						"Off: the whole channel is scaled by one factor, so the average hits the target but islands keep the relative sizes they had"))),
+			VrrMenu::Note(TAttribute<FText>::CreateSP(this, &SMenu_UVLayout::GetDensityInfoText)),
+			VrrMenu::ActionButton(LOCTEXT("ApplyDensity", "Scale UVs to Texel Density"),
+				LOCTEXT("ApplyDensityTip", "Rescale the channel on every LOD laid out (see LODs above). Undoable"),
+				[this]() { return Mesh.IsValid() ? UVLayout::GetDensityBlocker(Mesh.Get(), Settings) : LOCTEXT("NeedMesh", "Pick a mesh first."); },
+				FOnClicked::CreateSP(this, &SMenu_UVLayout::OnApplyDensityClicked)),
+			VrrMenu::StatusLine(&DensityStatusText, &bDensityStatusIsError),
+		}));
+	return VrrMenu::CardRow(SettingsCard, CreatePreviewCard(EUVPreview::Density));
+}
+
+/**
  * Balanced UV layout: one region, even density. "As Lightmap UVs" (static meshes) replaces Unreal's generated
- * lightmap; otherwise it goes into its own target channel. Settings and button on the left, preview on the right.
+ * lightmap; otherwise it goes into its own target channel. Settings card on the left, preview card on the right.
  */
 TSharedRef<SWidget> SMenu_UVLayout::CreateBalancedSection()
 {
@@ -326,10 +380,11 @@ TSharedRef<SWidget> SMenu_UVLayout::CreateBalancedSection()
 		VrrMenu::StatusLine(&BalancedStatusText, &bBalancedStatusIsError),
 	});
 
-	return VrrMenu::HelpCard(LOCTEXT("BalancedHeader", "Balanced UV Layout"),
+	TSharedRef<SWidget> SettingsCard = VrrMenu::HelpCard(LOCTEXT("BalancedHeader", "Balanced UV Layout"),
 		LOCTEXT("BalancedHelp", "Every island from the source channel is scaled to its 3D size and packed evenly over the whole square, ignoring material slots. "
 			"Use it as the lightmap on static meshes (replacing Unreal's generated lightmap UVs), or as a balanced channel for skinned meshes and custom materials."),
-		VrrMenu::SettingsAndPreview(SettingsColumn, CreatePreviewPanel(true)));
+		SettingsColumn);
+	return VrrMenu::CardRow(SettingsCard, CreatePreviewCard(EUVPreview::Balanced));
 }
 
 /** Padding and resolution defaults for the current use: 2 texels at the mesh's Light Map Resolution as a lightmap, else 4 px at 1024. */
@@ -350,7 +405,7 @@ void SMenu_UVLayout::ResetBalancedDefaults()
 
 /**
  * Grouped material layout: one region per material slot (columns first), for the Vrr UV Region material node.
- * Target channel, density and padding, and its button on the left; preview on the right.
+ * Target channel, density and padding, and its button in the settings card; preview card on the right.
  */
 TSharedRef<SWidget> SMenu_UVLayout::CreateGroupedSection()
 {
@@ -390,12 +445,13 @@ TSharedRef<SWidget> SMenu_UVLayout::CreateGroupedSection()
 		VrrMenu::StatusLine(&StatusText, &bStatusIsError),
 	});
 
-	return VrrMenu::HelpCard(LOCTEXT("GroupedHeader", "Grouped Material UV Layout"),
+	TSharedRef<SWidget> SettingsCard = VrrMenu::HelpCard(LOCTEXT("GroupedHeader", "Grouped Material UV Layout"),
 		LOCTEXT("GroupedHelp", "Each material slot's islands get their own region, laid out in columns first: 2 slots two columns, 3 slots three columns, more add rows (4 = 2 + 2, 5 = 3 + 2). "
 			"Regions fill the whole square in material slot order, so the Vrr UV Region material node can pick one by its number. "
 			"As UDIM tiles, each slot gets a whole tile of its own instead (1001, 1002, ...). "
 			"If the target is the lightmap channel, the lightmap moves up one channel first."),
-		VrrMenu::SettingsAndPreview(SettingsColumn, CreatePreviewPanel(false)));
+		SettingsColumn);
+	return VrrMenu::CardRow(SettingsCard, CreatePreviewCard(EUVPreview::Grouped));
 }
 
 // BEHAVIOR
@@ -411,9 +467,12 @@ void SMenu_UVLayout::SetMesh(UObject* NewMesh)
 	Settings.SourceChannel = 0;
 	Settings.TargetChannel = Mesh.IsValid() ? FMath::Min(1, NumUVChannels) : 1;
 	Settings.BalancedTargetChannel = Settings.TargetChannel;
+	Settings.DensityChannel = 0;
+	DensityStatusText = FText::GetEmpty();
 	ResetBalancedDefaults();
+	RefreshDensityInfo();
 
-	// Both previews: laid out for a usable mesh, cleared otherwise
+	// Every preview: made for a usable mesh, cleared otherwise
 	UpdatePreviews();
 }
 
@@ -484,14 +543,29 @@ FText SMenu_UVLayout::GetMeshInfoText() const
 		Lightmap >= 0 ? FText::Format(LOCTEXT("MeshInfoLightmap", "  |  lightmap UV{0}"), Lightmap) : FText::GetEmpty());
 }
 
-/** Island count, regions and coverage of one preview. */
-FText SMenu_UVLayout::GetPreviewInfoText(bool bBalanced) const
+/** Island count and coverage of one preview (density: how many tiles the scaled UVs span). */
+FText SMenu_UVLayout::GetPreviewInfoText(EUVPreview Which) const
 {
-	const TSharedPtr<FUVLayoutPreview>& Preview = GetPreviewSlot(bBalanced).Data;
+	const TSharedPtr<FUVLayoutPreview>& Preview = GetPreviewSlot(Which).Data;
 	if (!Preview.IsValid())
 	{
 		return Mesh.IsValid() ? LOCTEXT("NoPreview", "No preview yet.") : LOCTEXT("PreviewNeedsMesh", "Pick a mesh to see its layout.");
 	}
+
+	// Density: the result's size in tiles, which is what the setting changes
+	if (Which == EUVPreview::Density)
+	{
+		const FVector2f Tiles = Preview->Regions.IsEmpty() ? FVector2f(1.0f) : Preview->Regions[0].GetSize();
+		FText Info = FText::Format(LOCTEXT("DensityPreviewInfo", "LOD 0 after scaling: {0} islands over {1} x {2} tiles. The yellow square is 0-1."),
+			Preview->NumIslands, FMath::RoundToInt32(Tiles.X), FMath::RoundToInt32(Tiles.Y));
+		if (Preview->NumProjected > 0)
+		{
+			Info = FText::Format(LOCTEXT("DensityPreviewFlat", "{0} {1} islands have no UV area and stay as they are."), Info, Preview->NumProjected);
+		}
+		return Info;
+	}
+
+	const bool bBalanced = Which == EUVPreview::Balanced;
 	FText Info = bBalanced
 		? FText::Format(LOCTEXT("BalancedPreviewInfo", "LOD 0: {0} islands, {1} of the square covered."), Preview->NumIslands, FText::AsPercent(Preview->Coverage))
 		: Preview->bUDIM
@@ -515,35 +589,56 @@ FText SMenu_UVLayout::GetPreviewInfoText(bool bBalanced) const
 	return Info;
 }
 
-/** Has any setting that shapes this preview changed since it was made? */
-bool SMenu_UVLayout::IsPreviewStale(bool bBalanced) const
+/** Has any setting that shapes this preview changed since it was made? (Each preview checks only its own.) */
+bool SMenu_UVLayout::IsPreviewStale(EUVPreview Which) const
 {
-	const FPreviewSlot& Slot = GetPreviewSlot(bBalanced);
+	const FPreviewSlot& Slot = GetPreviewSlot(Which);
 	if (!Slot.Data.IsValid())
 	{
 		return false;
 	}
-	const FUVLayoutSettings A = GetPreviewLayoutSettings(bBalanced);
+	const FUVLayoutSettings A = GetPreviewLayoutSettings(Which);
 	const FUVLayoutSettings& B = Slot.MadeWith;
+	if (Which == EUVPreview::Density)
+	{
+		// Texture size only changes the px/m readout, not the UVs
+		return A.DensityChannel != B.DensityChannel || A.DensityMeters != B.DensityMeters || A.bDensityPerIsland != B.bDensityPerIsland;
+	}
 	return A.SourceChannel != B.SourceChannel || A.bRotateIslands != B.bRotateIslands || A.bGroupByMaterial != B.bGroupByMaterial
 		|| A.bMatchDensityAcrossMaterials != B.bMatchDensityAcrossMaterials || A.Padding != B.Padding || A.PaddingResolution != B.PaddingResolution
 		|| A.bGroupAsUDIMs != B.bGroupAsUDIMs || A.PackMethod != B.PackMethod || A.PackDetail != B.PackDetail || A.bStretchToFill != B.bStretchToFill;
 }
 
-/** The settings a preview lays out with: the material-region layout, or the balanced one. */
-FUVLayoutSettings SMenu_UVLayout::GetPreviewLayoutSettings(bool bBalanced) const
+/** The settings a preview is made with: the balanced layout's own, or the page's (density and grouped). */
+FUVLayoutSettings SMenu_UVLayout::GetPreviewLayoutSettings(EUVPreview Which) const
 {
-	return bBalanced ? UVLayout::MakeBalancedSettings(Settings) : Settings;
+	return Which == EUVPreview::Balanced ? UVLayout::MakeBalancedSettings(Settings) : Settings;
 }
 
-/** Lays out LOD 0 with the current settings and shows it in one preview. */
-void SMenu_UVLayout::UpdatePreview(bool bBalanced)
+/**
+ * Rebuilds one preview from LOD 0 with the current settings, without changing the mesh.
+ * 1. Compute it (density: the channel scaled; the layouts: packed). 2. Keep it with the settings it used, or clear
+ * it on failure. 3. Hand it to the widget.
+ */
+void SMenu_UVLayout::UpdatePreview(EUVPreview Which)
 {
-	FPreviewSlot& Slot = GetPreviewSlot(bBalanced);
+	FPreviewSlot& Slot = GetPreviewSlot(Which);
 	TSharedPtr<FUVLayoutPreview> NewPreview = MakeShared<FUVLayoutPreview>();
 	FText Error;
-	const FUVLayoutSettings LayoutSettings = GetPreviewLayoutSettings(bBalanced);
-	if (Mesh.IsValid() && NumUVChannels > 0 && UVLayout::ComputePreview(Mesh.Get(), LayoutSettings, *NewPreview, Error))
+	const FUVLayoutSettings LayoutSettings = GetPreviewLayoutSettings(Which);
+
+	// 1. Compute
+	bool bMade = false;
+	if (Mesh.IsValid() && NumUVChannels > 0)
+	{
+		bMade = Which == EUVPreview::Density
+			? UVLayout::ComputeDensityPreview(Mesh.Get(), LayoutSettings, *NewPreview, Error)
+			: UVLayout::ComputePreview(Mesh.Get(), LayoutSettings, *NewPreview, Error);
+	}
+
+	// 2. Keep or clear. Layout errors go to the status line; the density reason (e.g. the lightmap channel)
+	//    already shows next to its button, so it isn't repeated there.
+	if (bMade)
 	{
 		Slot.Data = NewPreview;
 		Slot.MadeWith = LayoutSettings;
@@ -551,60 +646,72 @@ void SMenu_UVLayout::UpdatePreview(bool bBalanced)
 	else
 	{
 		Slot.Data.Reset();
-		if (!Error.IsEmpty())
+		if (!Error.IsEmpty() && Which != EUVPreview::Density)
 		{
 			SetStatus(Error, true);
 		}
 	}
+
+	// 3. Show it
 	if (Slot.Widget.IsValid())
 	{
 		Slot.Widget->SetPreview(Slot.Data);
 	}
 }
 
-/** Refreshes both previews. */
+/** Refreshes every preview. */
 void SMenu_UVLayout::UpdatePreviews()
 {
-	UpdatePreview(false);
-	UpdatePreview(true);
+	UpdatePreview(EUVPreview::Density);
+	UpdatePreview(EUVPreview::Balanced);
+	UpdatePreview(EUVPreview::Grouped);
 }
 
-/** The preview widget, its info line, the Update button and the "Out of date" badge. */
-TSharedRef<SWidget> SMenu_UVLayout::CreatePreviewPanel(bool bBalanced)
+/**
+ * The preview card: the square, its info line, the Update button and the "Out of date" badge.
+ * Fixed width, so the info line wraps under the square instead of widening the card.
+ */
+TSharedRef<SWidget> SMenu_UVLayout::CreatePreviewCard(EUVPreview Which)
 {
-	// Fixed width so the info line wraps under the square instead of widening the column
-	return SNew(SBox)
-	.WidthOverride(PreviewSize)
-	[
-		VrrMenu::Rows({
-			SNew(SBox)
-			.WidthOverride(PreviewSize)
-			.HeightOverride(PreviewSize)
-			[
-				SAssignNew(GetPreviewSlot(bBalanced).Widget, SUVLayoutPreview)
-			],
-			VrrMenu::HelpText(TAttribute<FText>::CreateLambda([this, bBalanced]() { return GetPreviewInfoText(bBalanced); })),
-			SNew(SHorizontalBox)
-			+ SHorizontalBox::Slot().AutoWidth()
-			[
-				SNew(SButton)
-				.Text(LOCTEXT("UpdatePreview", "Update Preview"))
-				.ToolTipText(LOCTEXT("UpdatePreviewTip", "Lay out LOD 0 with the current settings, without changing the mesh"))
-				.IsEnabled_Lambda([this]() { return Mesh.IsValid() && NumUVChannels > 0; })
-				.OnClicked_Lambda([this, bBalanced]() { UpdatePreview(bBalanced); return FReply::Handled(); })
-			]
-			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(8.0f, 0.0f, 0.0f, 0.0f)
-			[
-				VrrMenu::Badge(TAttribute<FText>::CreateLambda([this, bBalanced]()
-				{
-					return IsPreviewStale(bBalanced) ? LOCTEXT("Stale", "Out of date") : FText::GetEmpty();
-				}), VrrMenu::WarningColor())
-			],
-		})
-	];
+	const FText Title = Which == EUVPreview::Density ? LOCTEXT("DensityPreviewHeader", "Texel Density Preview")
+		: Which == EUVPreview::Balanced ? LOCTEXT("BalancedPreviewHeader", "Balanced Preview")
+		: LOCTEXT("GroupedPreviewHeader", "Grouped Material Preview");
+	const FText UpdateTip = Which == EUVPreview::Density
+		? LOCTEXT("UpdateDensityPreviewTip", "Show LOD 0's channel scaled with the current settings, without changing the mesh")
+		: LOCTEXT("UpdatePreviewTip", "Lay out LOD 0 with the current settings, without changing the mesh");
+
+	return VrrMenu::Card(Title,
+		SNew(SBox)
+		.WidthOverride(PreviewSize)
+		[
+			VrrMenu::Rows({
+				SNew(SBox)
+				.WidthOverride(PreviewSize)
+				.HeightOverride(PreviewSize)
+				[
+					SAssignNew(GetPreviewSlot(Which).Widget, SUVLayoutPreview)
+				],
+				VrrMenu::HelpText(TAttribute<FText>::CreateLambda([this, Which]() { return GetPreviewInfoText(Which); })),
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth()
+				[
+					SNew(SButton)
+					.Text(LOCTEXT("UpdatePreview", "Update Preview"))
+					.ToolTipText(UpdateTip)
+					.IsEnabled_Lambda([this]() { return Mesh.IsValid() && NumUVChannels > 0; })
+					.OnClicked_Lambda([this, Which]() { UpdatePreview(Which); return FReply::Handled(); })
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(8.0f, 0.0f, 0.0f, 0.0f)
+				[
+					VrrMenu::Badge(TAttribute<FText>::CreateLambda([this, Which]()
+					{
+						return IsPreviewStale(Which) ? LOCTEXT("Stale", "Out of date") : FText::GetEmpty();
+					}), VrrMenu::WarningColor())
+				],
+			})
+		]);
 }
 
-/** Picks the first Static or Skeletal Mesh selected in the Content Browser. */
 /** Writes the layout, then re-reads the channel count (it may have grown) and refreshes the preview. */
 FReply SMenu_UVLayout::OnApplyClicked()
 {
@@ -622,6 +729,7 @@ FReply SMenu_UVLayout::OnApplyClicked()
 	{
 		const FText Status = StatusText;
 		NumUVChannels = VrrCore::GetNumUVChannels(Mesh.Get());
+		RefreshDensityInfo();
 		UpdatePreviews();
 		SetStatus(Status, false);
 	}
@@ -660,6 +768,60 @@ FReply SMenu_UVLayout::OnCreateBalancedClicked()
 	if (Result.bSuccess)
 	{
 		NumUVChannels = VrrCore::GetNumUVChannels(Mesh.Get());
+		RefreshDensityInfo();
+		UpdatePreviews();
+	}
+	return FReply::Handled();
+}
+
+// TEXEL DENSITY
+/** Re-measures LOD 0 (finding islands is too slow to do every frame in the info line). */
+void SMenu_UVLayout::RefreshDensityInfo()
+{
+	DensityInfo = Mesh.IsValid() ? UVLayout::MeasureDensity(Mesh.Get(), Settings.DensityChannel) : FUVDensityInfo();
+}
+
+/**
+ * "Target: 1,024 px/m (one tile = 1 m). Now: 730 px/m on average, islands 410-905 px/m: x1.40."
+ * Steps: 1. target from the settings, 2. current from the cached measurement, 3. the scale that will be applied.
+ */
+FText SMenu_UVLayout::GetDensityInfoText() const
+{
+	// 1. Target, in pixels per meter for this texture: UV per cm * texture px * 100 cm
+	const float PxPerUVPerM = Settings.DensityTextureSize * 100.0f;
+	const float Target = UVLayout::GetTargetUVPerCm(Settings);
+	auto PxPerM = [PxPerUVPerM](float UVPerCm) { return FText::AsNumber(FMath::RoundToInt32(UVPerCm * PxPerUVPerM)); };
+	const FText TargetText = FText::Format(LOCTEXT("DensityTarget", "Target: {0} px/m (one tile = {1} m)."), PxPerM(Target), FText::AsNumber(Settings.DensityMeters));
+	if (!Mesh.IsValid() || !DensityInfo.bValid)
+	{
+		return TargetText;
+	}
+
+	// 2. Current density and the spread between islands (one number when they already match)
+	const bool bEven = DensityInfo.MaxUVPerCm <= DensityInfo.MinUVPerCm * 1.02f;
+	const FText Now = bEven
+		? FText::Format(LOCTEXT("DensityNowEven", "Now: {0} px/m, even across {1} islands"), PxPerM(DensityInfo.AverageUVPerCm), DensityInfo.NumIslands)
+		: FText::Format(LOCTEXT("DensityNow", "Now: {0} px/m on average, islands {1}-{2} px/m"),
+			PxPerM(DensityInfo.AverageUVPerCm), PxPerM(DensityInfo.MinUVPerCm), PxPerM(DensityInfo.MaxUVPerCm));
+
+	// 3. The average scale the button will apply
+	FNumberFormattingOptions TwoDecimals;
+	TwoDecimals.SetMaximumFractionalDigits(2);
+	return FText::Format(LOCTEXT("DensityInfo", "{0} {1}: x{2}."), TargetText, Now,
+		FText::AsNumber(Target / DensityInfo.AverageUVPerCm, &TwoDecimals));
+}
+
+/** Rescales the channel, then re-measures and refreshes the previews (they're built from the source channel's islands). */
+FReply SMenu_UVLayout::OnApplyDensityClicked()
+{
+	const FUVLayoutResult Result = UVLayout::ApplyTexelDensity(Mesh.Get(), Settings);
+	DensityStatusText = Result.Message;
+	bDensityStatusIsError = !Result.bSuccess;
+	VrrMenu::Notify(Result.bSuccess ? LOCTEXT("DensityDoneToast", "UVs scaled to texel density") : Result.Message,
+		Result.bSuccess ? VrrMenu::ENotify::Success : VrrMenu::ENotify::Error);
+	if (Result.bSuccess)
+	{
+		RefreshDensityInfo();
 		UpdatePreviews();
 	}
 	return FReply::Handled();

@@ -66,6 +66,9 @@ namespace VrrMenu
 	/** Label in the label column, Content to its right (left-aligned, at its own size). */
 	TSharedRef<SWidget> Row(const FText& Label, const TSharedRef<SWidget>& Content, const FText& ToolTip = FText::GetEmpty(), const TAttribute<bool>& IsEnabled = true);
 
+	/** Two cards side by side, the same height: Main fills the width, Side (e.g. a preview card) keeps its own width. */
+	TSharedRef<SWidget> CardRow(const TSharedRef<SWidget>& Main, const TSharedRef<SWidget>& Side);
+
 	/** Settings column on the left (filling the width), a preview column on the right at its own size. */
 	TSharedRef<SWidget> SettingsAndPreview(const TSharedRef<SWidget>& SettingsColumn, const TSharedRef<SWidget>& PreviewColumn);
 
@@ -134,7 +137,7 @@ namespace VrrMenu
 		const FText& UseSelectedToolTip, const FText& NothingSelectedError, TFunction<void(const FText&)> OnError);
 
 	/** Which meshes a MeshPicker accepts. */
-	enum class EMeshTypes : uint8 { StaticOrSkeletal, SkeletalOnly };
+	enum class EMeshTypes : uint8 { StaticOrSkeletal, SkeletalOnly, StaticOnly };
 
 	/** AssetPicker for the meshes the bakers take, with matching tooltips and errors. */
 	TSharedRef<SWidget> MeshPicker(EMeshTypes Types, TFunction<UObject*()> GetMesh, TFunction<void(UObject*)> OnPicked, TFunction<void(const FText&)> OnError);

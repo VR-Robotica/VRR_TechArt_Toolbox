@@ -31,6 +31,16 @@
  *  (Apply), or on static meshes optionally as the lightmap UVs (ApplyLightmap): written where Unreal's generated
  *  lightmap went (Generate Lightmap UVs' destination, else the lightmap index, else a new last channel).
  *  Generate Lightmap UVs is turned off so the build keeps them, and the lightmap index and resolution point at them.
+ *
+ * Texel density (ApplyTexelDensity)
+ *  Rescales an existing channel in place (usually UV0, for tiling textures) so one UV tile covers a set distance,
+ *  e.g. a 512 px texture over 0.5 m = 1024 px/m. Nothing is moved or packed: islands keep their place and shape.
+ *  1. Find the channel's islands (as in step 1 above, across material slots).
+ *  2. Measure each island: density = sqrt(UV area / 3D area), in UV units per cm.
+ *  3. Scale by target / current: each island about its own center (even density everywhere), or the whole
+ *     channel by its average factor about its center (keeps the relative sizes the artist chose).
+ *  Islands with no UV area can't be measured and are left as they are. The lightmap channel is refused (it must
+ *  stay inside 0-1).
  */
 
 #include "Core_UVLayout.h"
@@ -1410,6 +1420,170 @@ namespace UVLayoutImpl
 			UVs.Set(Instance, Channel, NewUVs.IsValidIndex(Instance.GetValue()) ? NewUVs[Instance.GetValue()] : FVector2f::ZeroVector);
 		}
 	}
+
+	// TEXEL DENSITY
+
+	/** One island of a channel as texel density sees it: its corners and how much UV it spends on how much surface. */
+	struct FDensityIsland
+	{
+		/** Unique vertex instances (array indices). */
+		TArray<int32> Instances;
+		/** Its triangles, numbered in MeshDescription.Triangles() order. */
+		TArray<int32> Triangles;
+		double Area3D = 0.0;	// cm^2
+		double AreaUV = 0.0;	// UV units^2
+		FBox2f Bounds = FBox2f(ForceInit);
+
+		/** UV units per cm, or 0 when the island has no UV or surface area. */
+		float UVPerCm() const { return Area3D > 1e-6 && AreaUV > 1e-12 ? static_cast<float>(FMath::Sqrt(AreaUV / Area3D)) : 0.0f; }
+	};
+
+	/**
+	 * The islands of Channel, joined the same way as BuildLayout step 1 (shared vertex instance, or a corner with
+	 * the same position and UV), but across material slots: density doesn't care about materials.
+	 */
+	void FindDensityIslands(const FMeshDescription& MeshDescription, int32 Channel, TArray<FDensityIsland>& Out)
+	{
+		FStaticMeshConstAttributes Attributes(MeshDescription);
+		TVertexInstanceAttributesConstRef<FVector2f> UVs = Attributes.GetVertexInstanceUVs();
+		TVertexAttributesConstRef<FVector3f> Positions = Attributes.GetVertexPositions();
+
+		// 1. Triangle corners, in one flat list
+		TArray<FVertexInstanceID> Corners;
+		for (const FTriangleID TriangleID : MeshDescription.Triangles().GetElementIDs())
+		{
+			Corners.Append(MeshDescription.GetTriangleVertexInstances(TriangleID));
+		}
+		const int32 NumTriangles = Corners.Num() / 3;
+
+		// 2. Join triangles that share a vertex instance, or a corner with the same position and (quantized) UV
+		FUnionFind Sets(NumTriangles);
+		TMap<int32, int32> TriangleOfInstance;
+		TMap<FCornerKey, int32> TriangleOfKey;
+		for (int32 Triangle = 0; Triangle < NumTriangles; ++Triangle)
+		{
+			for (int32 i = 0; i < 3; ++i)
+			{
+				const FVertexInstanceID Instance = Corners[Triangle * 3 + i];
+				if (const int32* Other = TriangleOfInstance.Find(Instance.GetValue()))
+				{
+					Sets.Union(Triangle, *Other);
+				}
+				else
+				{
+					TriangleOfInstance.Add(Instance.GetValue(), Triangle);
+				}
+				const FVector2f UV = UVs.Get(Instance, Channel);
+				const FCornerKey Key{
+					MeshDescription.GetVertexInstanceVertex(Instance).GetValue(),
+					FMath::RoundToInt32(FMath::Clamp(UV.X, -16000.0f, 16000.0f) * 65536.0f),
+					FMath::RoundToInt32(FMath::Clamp(UV.Y, -16000.0f, 16000.0f) * 65536.0f),
+					0 };
+				if (const int32* Other = TriangleOfKey.Find(Key))
+				{
+					Sets.Union(Triangle, *Other);
+				}
+				else
+				{
+					TriangleOfKey.Add(Key, Triangle);
+				}
+			}
+		}
+
+		// 3. Per island: unique corners, UV bounds, and both areas
+		TMap<int32, int32> IslandOfRoot;
+		TSet<int32> Seen;
+		for (int32 Triangle = 0; Triangle < NumTriangles; ++Triangle)
+		{
+			const int32 Root = Sets.Find(Triangle);
+			const int32* Found = IslandOfRoot.Find(Root);
+			FDensityIsland& Island = Out[Found ? *Found : IslandOfRoot.Add(Root, Out.AddDefaulted())];
+			Island.Triangles.Add(Triangle);
+
+			FVector3f P[3];
+			FVector2f T[3];
+			for (int32 i = 0; i < 3; ++i)
+			{
+				const FVertexInstanceID Instance = Corners[Triangle * 3 + i];
+				P[i] = Positions[MeshDescription.GetVertexInstanceVertex(Instance)];
+				T[i] = UVs.Get(Instance, Channel);
+				Island.Bounds += T[i];
+				bool bAlreadySeen = false;
+				Seen.Add(Instance.GetValue(), &bAlreadySeen);
+				if (!bAlreadySeen)
+				{
+					Island.Instances.Add(Instance.GetValue());
+				}
+			}
+			Island.Area3D += 0.5 * FVector3f::CrossProduct(P[1] - P[0], P[2] - P[0]).Size();
+			Island.AreaUV += 0.5 * FMath::Abs(Cross2D(T[1] - T[0], T[2] - T[0]));
+		}
+	}
+
+	/**
+	 * New UVs for one LOD at TargetUVPerCm (indexed like the vertex instance array). Each island is scaled about its
+	 * own bounds center, or with bPerIsland off, every island by the channel's one average factor about the
+	 * channel's center. Islands with no UV area keep their UVs. Returns the number of those flat islands.
+	 * OutIslands (optional) receives the islands found, for the preview.
+	 */
+	int32 ComputeDensityUVs(const FMeshDescription& MeshDescription, int32 Channel, float TargetUVPerCm, bool bPerIsland, TArray<FVector2f>& OutUVs,
+		TArray<FDensityIsland>* OutIslands = nullptr)
+	{
+		// 1. Start from the current UVs, so anything not scaled stays exactly as it was
+		TVertexInstanceAttributesConstRef<FVector2f> UVs = FStaticMeshConstAttributes(MeshDescription).GetVertexInstanceUVs();
+		OutUVs.Init(FVector2f::ZeroVector, MeshDescription.VertexInstances().GetArraySize());
+		for (const FVertexInstanceID Instance : MeshDescription.VertexInstances().GetElementIDs())
+		{
+			OutUVs[Instance.GetValue()] = UVs.Get(Instance, Channel);
+		}
+
+		TArray<FDensityIsland> Islands;
+		FindDensityIslands(MeshDescription, Channel, Islands);
+
+		// 2. Whole channel: one factor from the total areas, one pivot for everything
+		float SharedFactor = 0.0f;
+		FVector2f SharedPivot = FVector2f::ZeroVector;
+		if (!bPerIsland)
+		{
+			FDensityIsland All;
+			for (const FDensityIsland& Island : Islands)
+			{
+				All.Area3D += Island.Area3D;
+				All.AreaUV += Island.AreaUV;
+				All.Bounds += Island.Bounds;
+			}
+			const float Current = All.UVPerCm();
+			SharedFactor = Current > 0.0f ? TargetUVPerCm / Current : 0.0f;
+			SharedPivot = All.Bounds.GetCenter();
+		}
+
+		// 3. Scale each island's corners about the pivot: UV' = Pivot + (UV - Pivot) * Factor
+		int32 NumFlat = 0;
+		for (const FDensityIsland& Island : Islands)
+		{
+			const float Current = Island.UVPerCm();
+			if (Current <= 0.0f)
+			{
+				++NumFlat;
+				continue;
+			}
+			const float Factor = bPerIsland ? TargetUVPerCm / Current : SharedFactor;
+			const FVector2f Pivot = bPerIsland ? Island.Bounds.GetCenter() : SharedPivot;
+			if (Factor <= 0.0f)
+			{
+				continue;
+			}
+			for (const int32 Instance : Island.Instances)
+			{
+				OutUVs[Instance] = Pivot + (OutUVs[Instance] - Pivot) * Factor;
+			}
+		}
+		if (OutIslands)
+		{
+			*OutIslands = MoveTemp(Islands);
+		}
+		return NumFlat;
+	}
 }
 
 namespace UVLayout
@@ -1799,6 +1973,223 @@ namespace UVLayout
 		Result.Message = FText::Format(LOCTEXT("LightmapDone", "Wrote lightmap UVs into UV{0} on {1} {1}|plural(one=LOD,other=LODs): {2} islands, {3} of the square covered, {4} texel padding at {5}. Generate Lightmap UVs is now off."),
 			Channel, LODs.Num(), Preview.NumIslands, FText::AsPercent(Preview.Coverage), Settings.BalancedPadding, Settings.BalancedResolution);
 		Result.Message = AddResultNotes(Result.Message, Preview, Skipped, LODs.Num());
+		return Result;
+	}
+
+	// TEXEL DENSITY
+
+	float GetTargetUVPerCm(const FUVLayoutSettings& Settings)
+	{
+		// One UV tile covers DensityMeters: 1 / (meters * 100) UV units per cm
+		return 1.0f / (FMath::Max(Settings.DensityMeters, 0.001f) * 100.0f);
+	}
+
+	FUVDensityInfo MeasureDensity(UObject* Mesh, int32 Channel)
+	{
+		FUVDensityInfo Info;
+		const FMeshDescription* MeshDescription = VrrCore::GetMeshDescription(Mesh, 0);
+		if (!MeshDescription || Channel < 0 || Channel >= FStaticMeshConstAttributes(*MeshDescription).GetVertexInstanceUVs().GetNumChannels())
+		{
+			return Info;
+		}
+
+		TArray<FDensityIsland> Islands;
+		FindDensityIslands(*MeshDescription, Channel, Islands);
+
+		// Average over the whole channel (area weighted), and the spread between islands
+		double Area3D = 0.0;
+		double AreaUV = 0.0;
+		Info.MinUVPerCm = UE_BIG_NUMBER;
+		for (const FDensityIsland& Island : Islands)
+		{
+			Area3D += Island.Area3D;
+			AreaUV += Island.AreaUV;
+			const float Density = Island.UVPerCm();
+			if (Density <= 0.0f)
+			{
+				++Info.NumFlat;
+				continue;
+			}
+			Info.MinUVPerCm = FMath::Min(Info.MinUVPerCm, Density);
+			Info.MaxUVPerCm = FMath::Max(Info.MaxUVPerCm, Density);
+		}
+		Info.NumIslands = Islands.Num();
+		Info.AverageUVPerCm = Area3D > 1e-6 ? static_cast<float>(FMath::Sqrt(AreaUV / Area3D)) : 0.0f;
+		Info.bValid = Info.AverageUVPerCm > 0.0f;
+		if (!Info.bValid)
+		{
+			Info.MinUVPerCm = 0.0f;
+		}
+		return Info;
+	}
+
+	bool ComputeDensityPreview(UObject* Mesh, const FUVLayoutSettings& Settings, FUVLayoutPreview& OutPreview, FText& OutError)
+	{
+		OutError = GetDensityBlocker(Mesh, Settings);
+		if (!OutError.IsEmpty())
+		{
+			return false;
+		}
+		const FMeshDescription& MeshDescription = *VrrCore::GetMeshDescription(Mesh, 0);
+
+		// 1. The scaled UVs and the islands they were scaled by
+		TArray<FVector2f> UVs;
+		TArray<FDensityIsland> Islands;
+		OutPreview = FUVLayoutPreview();
+		OutPreview.bTiled = true;
+		OutPreview.NumProjected = ComputeDensityUVs(MeshDescription, Settings.DensityChannel, GetTargetUVPerCm(Settings), Settings.bDensityPerIsland, UVs, &Islands);
+		OutPreview.NumIslands = Islands.Num();
+
+		// 2. Triangles in island order, colored per island (the preview cycles its palette by group number)
+		TArray<FVertexInstanceID> Corners;
+		for (const FTriangleID TriangleID : MeshDescription.Triangles().GetElementIDs())
+		{
+			Corners.Append(MeshDescription.GetTriangleVertexInstances(TriangleID));
+		}
+		FBox2f Bounds(FVector2f(0.0f), FVector2f(1.0f));	// always show the 0-1 tile
+		for (int32 Island = 0; Island < Islands.Num(); ++Island)
+		{
+			// 3. Outline: edges (by position, so hard-normal splits don't count) used by one triangle of the island
+			TMap<uint64, int32> EdgeUses;
+			auto EdgeKey = [&](int32 Triangle, int32 i)
+			{
+				uint32 A = static_cast<uint32>(MeshDescription.GetVertexInstanceVertex(Corners[Triangle * 3 + i]).GetValue());
+				uint32 B = static_cast<uint32>(MeshDescription.GetVertexInstanceVertex(Corners[Triangle * 3 + (i + 1) % 3]).GetValue());
+				if (A > B)
+				{
+					Swap(A, B);
+				}
+				return (static_cast<uint64>(A) << 32) | B;
+			};
+			for (const int32 Triangle : Islands[Island].Triangles)
+			{
+				for (int32 i = 0; i < 3; ++i)
+				{
+					const FVector2f UV = UVs[Corners[Triangle * 3 + i].GetValue()];
+					OutPreview.Triangles.Add(UV);
+					Bounds += UV;
+					EdgeUses.FindOrAdd(EdgeKey(Triangle, i))++;
+				}
+				OutPreview.TriangleGroups.Add(Island);
+			}
+			for (const int32 Triangle : Islands[Island].Triangles)
+			{
+				for (int32 i = 0; i < 3; ++i)
+				{
+					if (EdgeUses.FindChecked(EdgeKey(Triangle, i)) == 1)
+					{
+						OutPreview.Outlines.Add(UVs[Corners[Triangle * 3 + i].GetValue()]);
+						OutPreview.Outlines.Add(UVs[Corners[Triangle * 3 + (i + 1) % 3].GetValue()]);
+					}
+				}
+			}
+		}
+
+		// 4. The view: every whole tile the UVs touch
+		OutPreview.Regions.Add(FBox2f(
+			FVector2f(FMath::FloorToFloat(Bounds.Min.X), FMath::FloorToFloat(Bounds.Min.Y)),
+			FVector2f(FMath::CeilToFloat(Bounds.Max.X), FMath::CeilToFloat(Bounds.Max.Y))));
+		OutPreview.RegionNames.Add(NAME_None);
+		return true;
+	}
+
+	FText GetDensityBlocker(UObject* Mesh, const FUVLayoutSettings& Settings)
+	{
+		const FMeshDescription* MeshDescription = VrrCore::GetMeshDescription(Mesh, 0);
+		if (!MeshDescription)
+		{
+			return LOCTEXT("NoMeshData", "Pick a Static or Skeletal Mesh with source mesh data for LOD 0.");
+		}
+		const int32 Channel = Settings.DensityChannel;
+		if (Channel < 0 || Channel >= FStaticMeshConstAttributes(*MeshDescription).GetVertexInstanceUVs().GetNumChannels())
+		{
+			return FText::Format(LOCTEXT("PlanNoSource", "The mesh has no UV{0}."), Channel);
+		}
+		// Lightmaps must stay inside 0-1, so a real-world scale would break them
+		if (IsLightmapChannel(Cast<UStaticMesh>(Mesh), 0, Channel))
+		{
+			return FText::Format(LOCTEXT("DensityLightmap", "UV{0} is the lightmap channel, which must stay inside 0-1. Pick the texturing channel (usually UV0)."), Channel);
+		}
+		return FText::GetEmpty();
+	}
+
+	FUVLayoutResult ApplyTexelDensity(UObject* Mesh, const FUVLayoutSettings& Settings)
+	{
+		FUVLayoutResult Result;
+		Result.Message = GetDensityBlocker(Mesh, Settings);
+		if (!Result.Message.IsEmpty())
+		{
+			return Result;
+		}
+		const int32 Channel = Settings.DensityChannel;
+		const float Target = GetTargetUVPerCm(Settings);
+		TArray<int32> LODs = Settings.bAllLODs ? VrrCore::GetLODsWithMeshData(Mesh) : TArray<int32>{ 0 };
+		USkeletalMesh* SkeletalMesh = Cast<USkeletalMesh>(Mesh);
+		UStaticMesh* StaticMesh = Cast<UStaticMesh>(Mesh);
+
+		FScopedSlowTask SlowTask(static_cast<float>(LODs.Num() * 2 + 1), LOCTEXT("ApplyingDensity", "Scaling UVs to texel density..."));
+		SlowTask.MakeDialog();
+
+		// 1. Compute every LOD first (LODs without the channel are skipped), so nothing changes if one fails
+		TArray<TArray<FVector2f>> NewUVs;
+		TArray<int32> Skipped;
+		int32 NumFlat = 0;
+		for (int32 i = 0; i < LODs.Num(); ++i)
+		{
+			SlowTask.EnterProgressFrame(1.0f, FText::Format(LOCTEXT("Measuring", "Measuring LOD {0}..."), LODs[i]));
+			const FMeshDescription* MeshDescription = VrrCore::GetMeshDescription(Mesh, LODs[i]);
+			if (!MeshDescription || Channel >= FStaticMeshConstAttributes(*MeshDescription).GetVertexInstanceUVs().GetNumChannels())
+			{
+				Skipped.Add(LODs[i]);
+				LODs.RemoveAt(i--);
+				continue;
+			}
+			const int32 Flat = ComputeDensityUVs(*MeshDescription, Channel, Target, Settings.bDensityPerIsland, NewUVs.AddDefaulted_GetRef());
+			NumFlat += LODs[i] == 0 ? Flat : 0;
+		}
+
+		// 2. Write them (undoable); skeletal meshes rebuild when SkeletalScope ends
+		const FScopedTransaction Transaction(LOCTEXT("DensityTransaction", "Scale UVs to Texel Density"));
+		{
+			TUniquePtr<FScopedSkeletalMeshPostEditChange> SkeletalScope;
+			if (SkeletalMesh)
+			{
+				SkeletalScope = MakeUnique<FScopedSkeletalMeshPostEditChange>(SkeletalMesh);
+			}
+			Mesh->Modify();
+			for (int32 i = 0; i < LODs.Num(); ++i)
+			{
+				SlowTask.EnterProgressFrame(1.0f, FText::Format(LOCTEXT("Writing", "Writing LOD {0}..."), LODs[i]));
+				ModifyMeshDescription(Mesh, LODs[i]);
+				WriteChannel(*VrrCore::GetMeshDescription(Mesh, LODs[i]), Channel, NewUVs[i]);
+				CommitMeshDescription(Mesh, LODs[i]);
+			}
+			SlowTask.EnterProgressFrame(1.0f, LOCTEXT("Rebuilding", "Rebuilding mesh..."));
+			if (StaticMesh)
+			{
+				StaticMesh->PostEditChange();
+			}
+		}
+
+		// 3. Summary
+		Result.bSuccess = true;
+		Result.Message = FText::Format(LOCTEXT("DensityDone", "Scaled UV{0} on {1} {1}|plural(one=LOD,other=LODs) to {2} px/m (one tile = {3} m at {4} px){5}."),
+			Channel, LODs.Num(), FText::AsNumber(FMath::RoundToInt32(Target * Settings.DensityTextureSize * 100.0f)),
+			FText::AsNumber(Settings.DensityMeters), Settings.DensityTextureSize,
+			Settings.bDensityPerIsland ? LOCTEXT("DensityEach", ", each island evened out") : LOCTEXT("DensityWhole", ", whole channel by one factor"));
+		if (NumFlat > 0)
+		{
+			Result.Message = FText::Format(LOCTEXT("DensityFlat", "{0} {1} islands had no UV area and were left as they were."), Result.Message, NumFlat);
+		}
+		if (!Skipped.IsEmpty())
+		{
+			TArray<FString> Names;
+			for (const int32 LOD : Skipped)
+			{
+				Names.Add(FString::FromInt(LOD));
+			}
+			Result.Message = FText::Format(LOCTEXT("DensitySkipped", "{0} Skipped LOD {1} (no UV{2})."), Result.Message, FText::FromString(FString::Join(Names, TEXT(", "))), Channel);
+		}
 		return Result;
 	}
 }

@@ -163,6 +163,20 @@ namespace VrrMenu
 			];
 	}
 
+	/** Main card fills the width; Side keeps its own width. Both stretch to the taller one so their edges line up. */
+	TSharedRef<SWidget> CardRow(const TSharedRef<SWidget>& Main, const TSharedRef<SWidget>& Side)
+	{
+		return SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().FillWidth(1.0f).VAlign(VAlign_Fill).Padding(0.0f, 0.0f, CardGap, 0.0f)
+			[
+				Main
+			]
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Fill)
+			[
+				Side
+			];
+	}
+
 	/** Settings fill the width; the preview keeps its own size on the right. */
 	TSharedRef<SWidget> SettingsAndPreview(const TSharedRef<SWidget>& SettingsColumn, const TSharedRef<SWidget>& PreviewColumn)
 	{
@@ -464,6 +478,16 @@ namespace VrrMenu
 
 	TSharedRef<SWidget> MeshPicker(EMeshTypes Types, TFunction<UObject*()> GetMesh, TFunction<void(UObject*)> OnPicked, TFunction<void(const FText&)> OnError)
 	{
+		// Static meshes only (tools whose output is a static mesh in the source's space)
+		if (Types == EMeshTypes::StaticOnly)
+		{
+			return AssetPicker(UStaticMesh::StaticClass(),
+				[](const FAssetData& Asset) { return Asset.IsInstanceOf(UStaticMesh::StaticClass()); },
+				MoveTemp(GetMesh), MoveTemp(OnPicked),
+				LOCTEXT("UseSelectedStaticTip", "Use the static mesh selected in the Content Browser"),
+				LOCTEXT("NoStaticSelected", "Select a Static Mesh in the Content Browser first."),
+				MoveTemp(OnError));
+		}
 		const bool bSkeletalOnly = Types == EMeshTypes::SkeletalOnly;
 		return AssetPicker(
 			bSkeletalOnly ? USkeletalMesh::StaticClass() : UStreamableRenderAsset::StaticClass(),

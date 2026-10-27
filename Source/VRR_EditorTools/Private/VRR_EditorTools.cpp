@@ -17,6 +17,7 @@
 #include "Menu_RebakeTexture.h"
 #include "Menu_ConsolidateMaterials.h"
 #include "Menu_BakeMaps.h"
+#include "Menu_EdgeMesh.h"
 #include "Menu_ControlRig.h"
 #include "Menu_VATBake.h"
 
@@ -198,6 +199,8 @@ const TArray<FVRR_EditorTools::FPageInfo>& FVRR_EditorTools::GetPages()
 			LOCTEXT("ConsolidateDesc", "Bake every material on a multi-material mesh (Base Color, Metallic, Roughness, Normal...) through one UV channel into a single texture set."), "VrrTools.Page.Consolidate" },
 		{ EToolPage::BakeMaps, LOCTEXT("MapsTab", "Mesh Maps"), LOCTEXT("MapsTitle", "Bake Mesh Maps"),
 			LOCTEXT("MapsDesc", "Bake Cavity, Edge, Curvature and AO masks from a mesh's own geometry."), "VrrTools.Page.MeshMaps" },
+		{ EToolPage::EdgeMesh, LOCTEXT("EdgeMeshTab", "Edges"), LOCTEXT("EdgeMeshTitle", "Edge Mesh"),
+			LOCTEXT("EdgeMeshDesc", "Build strips along a static mesh's sharp outer edges, as their own mesh for edge-wear decal materials."), "VrrTools.Page.EdgeMesh" },
 		{ EToolPage::ControlRig, LOCTEXT("RigTab", "Rig"), LOCTEXT("RigTitle", "Control Rig Generator"),
 			LOCTEXT("RigDesc", "Generate a Modular Control Rig for a character's skeletal mesh."), "VrrTools.Page.Rig" },
 		{ EToolPage::VATBake, LOCTEXT("VATTab", "VAT"), LOCTEXT("VATTitle", "Vertex Animation Textures"),
@@ -263,6 +266,7 @@ TSharedRef<SDockTab> FVRR_EditorTools::OnSpawnTabWindow(const FSpawnTabArgs& Spa
 				+ SWidgetSwitcher::Slot()[ PageSlot(SNew(SMenu_ControlRig)) ]
 				+ SWidgetSwitcher::Slot()[ PageSlot(SNew(SMenu_VATBake)) ]
 				+ SWidgetSwitcher::Slot()[ PageSlot(SNew(SMenu_ConsolidateMaterials)) ]
+				+ SWidgetSwitcher::Slot()[ PageSlot(SNew(SMenu_EdgeMesh)) ]
 			]
 		]
 	];

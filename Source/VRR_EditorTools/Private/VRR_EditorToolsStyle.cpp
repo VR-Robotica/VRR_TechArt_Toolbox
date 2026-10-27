@@ -88,6 +88,7 @@ TSharedRef< FSlateStyleSet > FVRR_EditorToolsStyle::Create()
 	Style->Set("VrrTools.Page.Rebake", PageIcon(TEXT("AssetIcons/Texture2D_16.svg")));
 	Style->Set("VrrTools.Page.Consolidate", PageIcon(TEXT("Common/Layers.svg")));
 	Style->Set("VrrTools.Page.MeshMaps", PageIcon(TEXT("AssetIcons/Material_16.svg")));
+	Style->Set("VrrTools.Page.EdgeMesh", PageIcon(TEXT("AssetIcons/DecalActor_16.svg")));
 	Style->Set("VrrTools.Page.Rig", PageIcon(TEXT("AssetIcons/Skeleton_16.svg")));
 	Style->Set("VrrTools.Page.VAT", PageIcon(TEXT("AssetIcons/AnimSequence_16.svg")));
 

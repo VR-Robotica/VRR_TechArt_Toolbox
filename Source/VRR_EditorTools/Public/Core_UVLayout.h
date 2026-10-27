@@ -43,6 +43,26 @@ struct FUVLayoutSettings
 	EUVPackMethod BalancedPackMethod = EUVPackMethod::Shapes;
 	int32 BalancedPackDetail = 512;
 	bool bBalancedStretchToFill = false;
+
+	// Texel density: rescale an existing channel so one UV tile covers DensityMeters (e.g. a 512 px texture = 0.5 m)
+	int32 DensityChannel = 0;			// the channel rescaled in place (usually UV0, for tiling textures)
+	int32 DensityTextureSize = 1024;	// the texture that tiles over it: only used to show pixels per meter
+	float DensityMeters = 1.0f;			// meters one UV tile (the whole texture) covers
+	bool bDensityPerIsland = true;		// each island to the target (even density); off: one scale for the whole channel
+};
+
+/** How dense a UV channel is now: UV units per cm of surface (multiply by texture size * 100 for pixels per meter). */
+struct FUVDensityInfo
+{
+	bool bValid = false;
+	/** Whole channel: sqrt(total UV area / total 3D area). */
+	float AverageUVPerCm = 0.0f;
+	/** Least and most dense island (islands with no UV or surface area are left out). */
+	float MinUVPerCm = 0.0f;
+	float MaxUVPerCm = 0.0f;
+	int32 NumIslands = 0;
+	/** Islands with no UV area: they can't be scaled and are left as they are. */
+	int32 NumFlat = 0;
 };
 
 /** Where the balanced layout (or the lightmap UVs) will go. */
@@ -74,6 +94,8 @@ struct FUVLayoutPreview
 	float Coverage = 0.0f;
 	/** Regions are whole UDIM tiles (coordinates go past 0-1). */
 	bool bUDIM = false;
+	/** Texel density: UVs run past 0-1 over whole tiles; Regions[0] is the tiles covered (0-1 always included). */
+	bool bTiled = false;
 	/** Islands with no UV area in the source channel, laid flat from their 3D shape instead. */
 	int32 NumProjected = 0;
 
@@ -152,4 +174,27 @@ namespace UVLayout
 	 * build keeps them, and points the mesh's lightmap index and resolution at them.
 	 */
 	FUVLayoutResult ApplyLightmap(UObject* Mesh, const FUVLayoutSettings& Settings);
+
+	// TEXEL DENSITY (rescale an existing channel in place)
+
+	/** UV units per cm the settings ask for: one tile per DensityMeters. */
+	float GetTargetUVPerCm(const FUVLayoutSettings& Settings);
+
+	/** LOD 0's current density in Channel (bValid false if the mesh or channel is missing). */
+	FUVDensityInfo MeasureDensity(UObject* Mesh, int32 Channel);
+
+	/**
+	 * LOD 0's channel as it will look after scaling, without changing the mesh: triangles colored per island,
+	 * island outlines, and the whole tiles the UVs cover (bTiled). NumProjected counts the flat islands left as-is.
+	 */
+	bool ComputeDensityPreview(UObject* Mesh, const FUVLayoutSettings& Settings, FUVLayoutPreview& OutPreview, FText& OutError);
+
+	/** Why the channel can't be rescaled (no mesh or channel, or it's the lightmap), or empty. */
+	FText GetDensityBlocker(UObject* Mesh, const FUVLayoutSettings& Settings);
+
+	/**
+	 * Scales DensityChannel (every LOD laid out, undoable) to the target density: each island about its own center,
+	 * or with bDensityPerIsland off, the whole channel by one factor about its center (relative sizes kept).
+	 */
+	FUVLayoutResult ApplyTexelDensity(UObject* Mesh, const FUVLayoutSettings& Settings);
 }

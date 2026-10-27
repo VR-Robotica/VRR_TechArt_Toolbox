@@ -60,7 +60,7 @@ private:
 	TSharedPtr<class FUICommandList> EditorToolsCommandList;
 
 	// Pages shown in the Toolbox main area, picked from the left toolbar (value = page switcher index)
-	enum class EToolPage : int32 { TexturePacker, AssetValidation, BakeNormals, UVLayout, RebakeTexture, BakeMaps, ControlRig, VATBake, ConsolidateMaterials };
+	enum class EToolPage : int32 { TexturePacker, AssetValidation, BakeNormals, UVLayout, RebakeTexture, BakeMaps, ControlRig, VATBake, ConsolidateMaterials, EdgeMesh };
 	EToolPage ActivePage = EToolPage::AssetValidation;
 
 	/** What the sidebar tab and the header show for a page. */
