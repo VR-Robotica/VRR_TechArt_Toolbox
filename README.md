@@ -1,5 +1,7 @@
 # UE 5.8 TechArt Toolbox
 
+<img width="1920" height="1080" alt="UE5_TAT_01_AssetValidation" src="https://github.com/user-attachments/assets/31ec74b5-213d-4a8f-8f54-a45f85f29c84" />
+
 1. Validate (Asset Validation)
 
 Checks a folder or the Content Browser selection against the project's naming and asset rules.
@@ -14,6 +16,8 @@ Checks a folder or the Content Browser selection against the project's naming an
 - Fix All applies the automatic fixes: renames and texture settings. For an unknown prefix, you choose whether to keep it or replace it.
 - Export: writes the results to a JSON report.
 
+<img width="1920" height="1080" alt="UE5_TAT_02_TexturePacker" src="https://github.com/user-attachments/assets/ea79984c-8323-436b-8599-421c898507da" />
+
 2. Packer (Texture Packer)
 
 - Combines channels from up to 4 textures into one RGBA output, e.g. an _ORM mask.
@@ -22,6 +26,8 @@ Checks a folder or the Content Browser selection against the project's naming an
 - Sources are read from their original import data, so values copy exactly.
 - The live preview uses the same code as the final pack, so it matches the result.
 
+<img width="1920" height="1080" alt="UE5_TAT_03_BakeSmooth" src="https://github.com/user-attachments/assets/ba342871-716f-4e54-ba72-61ef8da24ea9" />
+
 3. Normals (Bake Smooth Normals)
 
 - Bakes averaged normals so inverted-hull toon outlines don't split open at hard edges or UV seams.
@@ -29,6 +35,8 @@ Checks a folder or the Content Browser selection against the project's naming an
 - Texture target: the same data baked into an uncompressed texture.
 - The optional thickness mask makes outlines thinner on small features like noses and fingers.
 - Normals can be stored in tangent space (follows skinning) or object space (static meshes only).
+
+<img width="1920" height="1080" alt="UE5_TAT_04_UVLayout" src="https://github.com/user-attachments/assets/ac4e5c98-c0a9-4c26-abd9-e4551ec3a92f" />
 
 4. UV Layouts
 
@@ -40,6 +48,8 @@ Checks a folder or the Content Browser selection against the project's naming an
 - Texel Density mode: rescales an existing channel in place to a target px/m, without repacking.
 - If the lightmap already uses the target channel, it is moved up one channel automatically.
 
+<img width="1920" height="1080" alt="UE5_TAT_05_RebakeTexture" src="https://github.com/user-attachments/assets/6d84a348-80b7-46ba-8187-90c7f26da5b0" />
+
 5. Rebake (Rebake Texture Map to UV Set)
 
 - Moves a texture from one UV channel to another, e.g. from an overlapping UV0 to the unique UV1 built by UV Layouts.
@@ -48,6 +58,8 @@ Checks a folder or the Content Browser selection against the project's naming an
 - Pads the islands and fills empty space so mips stay clean.
 - Shows the source and the result side by side.
 
+<img width="1920" height="1080" alt="UE5_TAT_06_Consolidate" src="https://github.com/user-attachments/assets/4ce8e2bc-ae9c-4994-9395-44e5640e24f3" />
+
 6. Consolidate (Consolidate Materials Texture Sets)
 
 - Bakes every material on a multi-material mesh into a single texture set through one UV channel (_D, _N, _R…).
@@ -55,6 +67,8 @@ Checks a folder or the Content Browser selection against the project's naming an
 - Reports places where two slots overlap in UV space.
 - Skips outputs that are one value everywhere, like no metallic or no emissive.
 - Split by Shading Model gives each shading model its own set, e.g. DefaultLit and PreintegratedSkin.
+
+<img width="1920" height="1080" alt="UE5_TAT_07_BakeMeshMaps" src="https://github.com/user-attachments/assets/4be633ea-7604-4df1-a056-9d75f378fb22" />
 
 7. Mesh Maps (Bake Mesh Maps)
 
@@ -65,11 +79,15 @@ Checks a folder or the Content Browser selection against the project's naming an
 - AO is ray-traced, run in parallel, and then smoothed.
 - Also supports Split by Shading Model.
 
+<img width="1920" height="1080" alt="UE5_TAT_08_EdgeMesh" src="https://github.com/user-attachments/assets/a2281cbc-f955-47ca-8b21-46e10403efdd" />
+
 8. Edges (Edge Mesh)
 
 - Builds thin strips along a static mesh's sharp outer edges, as a separate mesh for edge-wear decal materials.
 - Controls: Min Angle, convex only, Max Turn Angle (corners end a strip), Min Length, Width and Surface Offset.
 - Each strip gets its own UVs: U runs along the edge, V across it. That lets one tiling decal work on any mesh at any size.
+
+<img width="1920" height="1080" alt="UE5_TAT_09_CRSetup" src="https://github.com/user-attachments/assets/8b8cb833-a03a-4ee1-8f12-fb6e097c6640" />
 
 9. Rig (Control Rig Generator)
 
@@ -78,6 +96,8 @@ Checks a folder or the Content Browser selection against the project's naming an
 - The page shows the bone map so you can check it before generating.
 - Creates the modules (Root, Spine, Neck, Shoulder, Arm, Finger, Leg, Foot), plus a Chain module for each face or extra bone.
 - Writes a report of what got connected and what's still open.
+
+<img width="1920" height="1080" alt="UE5_TAT_10_VATBaker" src="https://github.com/user-attachments/assets/209ebad8-fc05-44fa-8e4e-8e08ec65c776" />
 
 10. VAT (Vertex Animation Textures)
 
