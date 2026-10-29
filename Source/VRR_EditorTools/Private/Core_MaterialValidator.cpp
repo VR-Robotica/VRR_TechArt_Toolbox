@@ -5,22 +5,26 @@
  *
  * Strategy (like the mesh validator)
  *  - The prefix says what the asset is: M_ material (master material), MI_ material instance,
- *    MF_ or ML_ material function (ML_ for material layers and layer blends, by habit, but either is accepted).
+ *    MF_ or ML_ material function (ML_ for material layers and layer blends, by habit, but either is accepted),
+ *    PPM_ post process material (Post Process domain), PPMI_ instance of one (its root parent is post process).
  *  - If the name carries another material kind's prefix, say which one it should be (clearer than "missing prefix").
  *  - After the prefix: letters, digits and single underscores (AssetValidation::GetNameBodyProblem).
  *  - Instances shouldn't keep the _Inst suffix Unreal gives a new instance (M_Rock_Inst).
  *  - Every naming issue carries the one name that fixes them all (M_Rock_Inst -> MI_Rock) for Fix All. An unknown
  *    prefix is kept or replaced, as the person fixing chooses (Mat_Rock -> M_Mat_Rock or M_Rock).
- *  - Only the asset's class and name are needed to check, so nothing is loaded.
+ *  - Only the asset's class, name and Asset Registry tags (MaterialDomain, an instance's Parent) are needed, so nothing is loaded.
+ *  - Renaming to a post process prefix drops a leading PP_ that the old name carried (M_PP_CelShadow -> PPM_CelShadow).
  */
 
 #include "Core_MaterialValidator.h"
 
+#include "AssetRegistry/IAssetRegistry.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialFunctionInterface.h"
 #include "Materials/MaterialFunctionMaterialLayer.h"
 #include "Materials/MaterialFunctionMaterialLayerBlend.h"
 #include "Materials/MaterialInstance.h"
+#include "Misc/PackageName.h"
 
 #define LOCTEXT_NAMESPACE "MaterialValidator"
 
@@ -28,22 +32,81 @@ namespace MaterialValidator
 {
 	using ESeverity = FAssetIssue::ESeverity;
 
-	enum class EKind : uint8 { None, Material, Instance, Function };
+	enum class EKind : uint8 { None, Material, Instance, Function, PostProcess, PostProcessInstance };
+
+	constexpr EKind AllKinds[] = { EKind::Material, EKind::Instance, EKind::Function, EKind::PostProcess, EKind::PostProcessInstance };
 
 	/** Prefixes each kind may start with (case-sensitive, as the convention is). */
 	const TCHAR* const MaterialPrefixes[] = { TEXT("M_") };
 	const TCHAR* const InstancePrefixes[] = { TEXT("MI_") };
 	const TCHAR* const FunctionPrefixes[] = { TEXT("MF_"), TEXT("ML_") };
+	const TCHAR* const PostProcessPrefixes[] = { TEXT("PPM_") };
+	const TCHAR* const PostProcessInstancePrefixes[] = { TEXT("PPMI_") };
+
+	/** Leading part of an old post process name that the PPM_/PPMI_ prefix replaces (M_PP_CelShadow -> PPM_CelShadow). */
+	const TCHAR* const OldPostProcessTag = TEXT("PP_");
+
+	enum class EDomain : uint8 { Unknown, PostProcess, Other };
+
+	/** A material's domain from its MaterialDomain tag, or Unknown if the tag is missing. */
+	EDomain GetMaterialDomain(const FAssetData& Material)
+	{
+		FString Domain;
+		if (!Material.GetTagValue(GET_MEMBER_NAME_CHECKED(UMaterial, MaterialDomain), Domain))
+		{
+			return EDomain::Unknown;
+		}
+		return Domain.EndsWith(TEXT("PostProcess")) ? EDomain::PostProcess : EDomain::Other;
+	}
+
+	/** An instance's domain: follows the Parent tags up to the root material. Unknown if the chain breaks. */
+	EDomain GetInstanceDomain(const FAssetData& Instance)
+	{
+		const IAssetRegistry& AssetRegistry = IAssetRegistry::GetChecked();
+		FAssetData Current = Instance;
+		for (int32 Depth = 0; Depth < 32; ++Depth)	// guards against a parent loop
+		{
+			if (Current.IsInstanceOf(UMaterial::StaticClass()))
+			{
+				return GetMaterialDomain(Current);
+			}
+			FString ParentPath;
+			if (!Current.GetTagValue(GET_MEMBER_NAME_CHECKED(UMaterialInstance, Parent), ParentPath) || ParentPath.IsEmpty() || ParentPath == TEXT("None"))
+			{
+				return EDomain::Unknown;
+			}
+			Current = AssetRegistry.GetAssetByObjectPath(FSoftObjectPath(FPackageName::ExportTextPathToObjectPath(ParentPath)));
+			if (!Current.IsValid())
+			{
+				return EDomain::Unknown;
+			}
+		}
+		return EDomain::Unknown;
+	}
+
+	/**
+	 * The post process kind if the domain says so. If the domain can't be read (tag missing, parent not found),
+	 * a PPM_/PPMI_ name is trusted rather than flagged.
+	 */
+	EKind PickKind(EDomain Domain, const FAssetData& Asset, EKind Normal, EKind PostProcess, const TCHAR* PostProcessPrefix)
+	{
+		if (Domain == EDomain::PostProcess
+			|| (Domain == EDomain::Unknown && Asset.AssetName.ToString().StartsWith(PostProcessPrefix, ESearchCase::CaseSensitive)))
+		{
+			return PostProcess;
+		}
+		return Normal;
+	}
 
 	EKind GetKind(const FAssetData& Asset)
 	{
 		if (Asset.IsInstanceOf(UMaterial::StaticClass()))
 		{
-			return EKind::Material;
+			return PickKind(GetMaterialDomain(Asset), Asset, EKind::Material, EKind::PostProcess, PostProcessPrefixes[0]);
 		}
 		if (Asset.IsInstanceOf(UMaterialInstance::StaticClass()))
 		{
-			return EKind::Instance;
+			return PickKind(GetInstanceDomain(Asset), Asset, EKind::Instance, EKind::PostProcessInstance, PostProcessInstancePrefixes[0]);
 		}
 		if (Asset.IsInstanceOf(UMaterialFunctionInterface::StaticClass()))
 		{
@@ -59,6 +122,8 @@ namespace MaterialValidator
 		case EKind::Material:	return MaterialPrefixes;
 		case EKind::Instance:	return InstancePrefixes;
 		case EKind::Function:	return FunctionPrefixes;
+		case EKind::PostProcess:	return PostProcessPrefixes;
+		case EKind::PostProcessInstance:	return PostProcessInstancePrefixes;
 		default:				return {};
 		}
 	}
@@ -70,6 +135,8 @@ namespace MaterialValidator
 		case EKind::Material:	return LOCTEXT("KindMaterial", "material");
 		case EKind::Instance:	return LOCTEXT("KindInstance", "material instance");
 		case EKind::Function:	return LOCTEXT("KindFunction", "material function");
+		case EKind::PostProcess:	return LOCTEXT("KindPostProcess", "post process material");
+		case EKind::PostProcessInstance:	return LOCTEXT("KindPostProcessInstance", "post process material instance");
 		default:				return FText::GetEmpty();
 		}
 	}
@@ -95,13 +162,30 @@ namespace MaterialValidator
 
 	FString GetPrefixList()
 	{
-		return FString::Printf(TEXT("%s (Material), %s (Material Instance), %s (Material Function)"),
-			*JoinPrefixes(EKind::Material), *JoinPrefixes(EKind::Instance), *JoinPrefixes(EKind::Function));
+		return FString::Printf(TEXT("%s (Material), %s (Material Instance), %s (Material Function), %s (Post Process Material), %s (Post Process Material Instance)"),
+			*JoinPrefixes(EKind::Material), *JoinPrefixes(EKind::Instance), *JoinPrefixes(EKind::Function),
+			*JoinPrefixes(EKind::PostProcess), *JoinPrefixes(EKind::PostProcessInstance));
 	}
 
 	bool IsMaterialAsset(const FAssetData& Asset)
 	{
 		return GetKind(Asset) != EKind::None;
+	}
+
+	bool IsInstanceKind(EKind Kind)
+	{
+		return Kind == EKind::Instance || Kind == EKind::PostProcessInstance;
+	}
+
+	bool IsPostProcessKind(EKind Kind)
+	{
+		return Kind == EKind::PostProcess || Kind == EKind::PostProcessInstance;
+	}
+
+	/** The material kind an instance kind is made from (Instance -> Material), or None. */
+	EKind GetParentKind(EKind Kind)
+	{
+		return Kind == EKind::Instance ? EKind::Material : Kind == EKind::PostProcessInstance ? EKind::PostProcess : EKind::None;
 	}
 
 	const TCHAR* const InstSuffix = TEXT("_Inst");
@@ -140,7 +224,7 @@ namespace MaterialValidator
 	/** The other kind whose prefix Name starts with (an M_ instance, an MI_ material...), or None. */
 	EKind FindWrongKind(const FString& Name, EKind Kind, FString& OutPrefix)
 	{
-		for (const EKind Other : { EKind::Material, EKind::Instance, EKind::Function })
+		for (const EKind Other : AllKinds)
 		{
 			if (Other != Kind)
 			{
@@ -176,7 +260,7 @@ namespace MaterialValidator
 		};
 
 		// 1. _Inst suffix
-		const FString WithoutInst = Kind == EKind::Instance && Settings.bCheckInstSuffix ? StripInstSuffix(Name) : FString();
+		const FString WithoutInst = IsInstanceKind(Kind) && Settings.bCheckInstSuffix ? StripInstSuffix(Name) : FString();
 		const FString Stripped = WithoutInst.IsEmpty() ? Name : WithoutInst;
 
 		// 2. Prefix and body
@@ -187,7 +271,17 @@ namespace MaterialValidator
 		FString FixedName;
 		if (Settings.bCheckNaming)
 		{
-			const FString CleanBody = AssetValidation::CleanNameBody(Body);
+			// Getting a post process prefix: drop the old PP_ tag (M_PP_CelShadow -> PPM_CelShadow)
+			FString NewBody = Body;
+			if (Prefix.IsEmpty() && IsPostProcessKind(Kind) && NewBody.StartsWith(OldPostProcessTag, ESearchCase::IgnoreCase))
+			{
+				const FString WithoutTag = NewBody.Mid(FCString::Strlen(OldPostProcessTag));
+				if (!AssetValidation::CleanNameBody(WithoutTag).IsEmpty())
+				{
+					NewBody = WithoutTag;
+				}
+			}
+			const FString CleanBody = AssetValidation::CleanNameBody(NewBody);
 			const FString WantedPrefix = Prefix.IsEmpty() ? GetDefaultPrefix(Asset, Kind) : Prefix;
 			FixedName = CleanBody.IsEmpty() ? FString() : WantedPrefix + CleanBody;
 
@@ -197,8 +291,8 @@ namespace MaterialValidator
 		}
 		else if (!WithoutInst.IsEmpty())
 		{
-			// Only the suffix check: still swap the parent's M_ for MI_ so the instance doesn't take its parent's name
-			FixedName = WrongKind == EKind::Material ? InstancePrefixes[0] + Body : WithoutInst;
+			// Only the suffix check: still swap the parent's M_ for MI_ (PPM_ for PPMI_) so the instance doesn't take its parent's name
+			FixedName = WrongKind != EKind::None && WrongKind == GetParentKind(Kind) ? GetPrefixes(Kind)[0] + Body : WithoutInst;
 		}
 
 		// 3. Issues

@@ -292,13 +292,13 @@ TSharedRef<SWidget> SMenu_AssetValidation::CreateMeshSection()
 TSharedRef<SWidget> SMenu_AssetValidation::CreateMaterialSection()
 {
 	return MakeValidationCard(LOCTEXT("MaterialHeader", "Material Validation"), &bValidateMaterials,
-		LOCTEXT("MaterialHeaderTip", "Check materials, material instances and material functions when scanning"), {
+		LOCTEXT("MaterialHeaderTip", "Check materials, material instances, material functions and post process materials when scanning"), {
 		VrrMenu::Row(LOCTEXT("MaterialNamingLabel", "Naming"),
 			VrrMenu::CheckBox(&MaterialSettings.bCheckNaming, LOCTEXT("CheckMaterialNaming", "Naming convention"),
 				FText::Format(LOCTEXT("CheckMaterialNamingTip", "Prefix fits the asset: {0}. After the prefix: letters, digits and single underscores"), FText::FromString(MaterialValidator::GetPrefixList())))),
 		VrrMenu::Row(LOCTEXT("InstSuffixLabel", "Instances"),
 			VrrMenu::CheckBox(&MaterialSettings.bCheckInstSuffix, LOCTEXT("CheckInstSuffix", "No _Inst suffix"),
-				LOCTEXT("CheckInstSuffixTip", "Material instances don't keep the _Inst suffix Unreal adds to new instances (M_Rock_Inst). Fix All renames them (to MI_Rock)"))),
+				LOCTEXT("CheckInstSuffixTip", "Material instances don't keep the _Inst suffix Unreal adds to new instances (M_Rock_Inst). Fix All renames them (to MI_Rock, or PPMI_ for post process instances)"))),
 	});
 }
 
