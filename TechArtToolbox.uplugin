@@ -1,0 +1,40 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "TechArt Toolbox",
+	"Description": "One editor window of technical art tools: asset validation, texture packing, smooth normal / mesh map / material baking, UV layouts, edge meshes, Modular Control Rig generation and vertex animation texture setup.",
+	"Category": "Editor",
+	"CreatedBy": "VR Robotica",
+	"CreatedByURL": "https://github.com/VR-Robotica",
+	"DocsURL": "https://github.com/VR-Robotica/TechArtToolbox#readme",
+	"FabURL": "",
+	"SupportURL": "https://github.com/VR-Robotica/TechArtToolbox/issues",
+	"EngineVersion": "5.8.0",
+	"CanContainContent": false,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "TechArtToolbox",
+			"Type": "Editor",
+			"LoadingPhase": "Default",
+			"PlatformAllowList": [ "Win64", "Mac", "Linux" ]
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "AnimToTexture",
+			"Enabled": true
+		},
+		{
+			"Name": "ControlRig",
+			"Enabled": true
+		},
+		{
+			"Name": "ControlRigModules",
+			"Enabled": true
+		}
+	]
+}
