@@ -20,6 +20,9 @@
  *     and everything that is connected (or still open) is written to the report and the Output Log.
  */
 
+// Not built on UE 5.6: see TECHARTTOOLBOX_WITH_RIG in TechArtToolbox.Build.cs.
+#if TECHARTTOOLBOX_WITH_RIG
+
 #include "Core_ControlRig.h"
 
 #include "Algo/AllOf.h"
@@ -1571,3 +1574,5 @@ namespace ControlRigGenerator
 }
 
 #undef LOCTEXT_NAMESPACE
+
+#endif // TECHARTTOOLBOX_WITH_RIG

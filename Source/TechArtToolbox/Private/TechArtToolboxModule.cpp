@@ -20,7 +20,9 @@
 #include "Menu_ConsolidateMaterials.h"
 #include "Menu_BakeMaps.h"
 #include "Menu_EdgeMesh.h"
+#if TECHARTTOOLBOX_WITH_RIG
 #include "Menu_ControlRig.h"
+#endif
 #include "Menu_VATBake.h"
 
 #include "ToolMenus.h"
@@ -171,8 +173,10 @@ const TArray<FTechArtToolboxModule::FPageInfo>& FTechArtToolboxModule::GetPages(
 			LOCTEXT("MapsDesc", "Bake Cavity, Edge, Curvature and AO masks from a mesh's own geometry."), "VrrTools.Page.MeshMaps" },
 		{ EToolPage::EdgeMesh, LOCTEXT("EdgeMeshTab", "Edges"), LOCTEXT("EdgeMeshTitle", "Edge Mesh"),
 			LOCTEXT("EdgeMeshDesc", "Build strips along a static mesh's sharp outer edges, as their own mesh for edge-wear decal materials."), "VrrTools.Page.EdgeMesh" },
+#if TECHARTTOOLBOX_WITH_RIG
 		{ EToolPage::ControlRig, LOCTEXT("RigTab", "Rig"), LOCTEXT("RigTitle", "Control Rig Generator"),
 			LOCTEXT("RigDesc", "Generate a Modular Control Rig for a character's skeletal mesh."), "VrrTools.Page.Rig" },
+#endif
 		{ EToolPage::VATBake, LOCTEXT("VATTab", "VAT"), LOCTEXT("VATTitle", "Vertex Animation Textures"),
 			LOCTEXT("VATDesc", "Set up an AnimToTexture Data Asset: pick a skeletal mesh, its animations, and Bone or Vertex baking."), "VrrTools.Page.VAT" },
 	};
@@ -233,7 +237,11 @@ TSharedRef<SDockTab> FTechArtToolboxModule::OnSpawnTabWindow(const FSpawnTabArgs
 				+ SWidgetSwitcher::Slot()[ PageSlot(SNew(SMenu_UVLayout)) ]
 				+ SWidgetSwitcher::Slot()[ PageSlot(SNew(SMenu_RebakeTexture)) ]
 				+ SWidgetSwitcher::Slot()[ PageSlot(SNew(SMenu_BakeMaps)) ]
+#if TECHARTTOOLBOX_WITH_RIG
 				+ SWidgetSwitcher::Slot()[ PageSlot(SNew(SMenu_ControlRig)) ]
+#else
+				+ SWidgetSwitcher::Slot()[ SNullWidget::NullWidget ]	// keeps the slot order; the Rig page needs UE 5.7+
+#endif
 				+ SWidgetSwitcher::Slot()[ PageSlot(SNew(SMenu_VATBake)) ]
 				+ SWidgetSwitcher::Slot()[ PageSlot(SNew(SMenu_ConsolidateMaterials)) ]
 				+ SWidgetSwitcher::Slot()[ PageSlot(SNew(SMenu_EdgeMesh)) ]

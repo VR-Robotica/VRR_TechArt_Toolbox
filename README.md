@@ -2,7 +2,7 @@
 
 This is a growing collection of tools created from previous projects working with Unreal. I have migrated them from UE 4.26 and 5.2 Editor Utility Widgets into C++ for UE 5.8 with the assistance of Claude Code to maintain formatting and consistency. They are free to use under the MIT License (see [LICENSE](LICENSE)). New tools will be added sporadically as my projects deem their usefulness.
 
-Editor only: nothing ships with your game. Supported engines: **5.7, 5.8**. Platforms: Windows, macOS, Linux (editor).
+Editor only: nothing ships with your game. Supported engines: **5.6, 5.7, 5.8** (the Rig page needs 5.7 or later). Platforms: Windows, macOS, Linux (editor).
 
 Open it from the **TechArt** menu in the main menu bar, from **Window > TechArt Toolbox**, or with the toolbar button next to Play. Each tool is a page in the window's sidebar.
 
@@ -88,7 +88,7 @@ Checks a folder or the Content Browser selection against the project's naming an
 ## 9. Rig (Control Rig Generator)
 <img width="1920" height="1080" alt="UE5_TAT_09_CRSetup" src="https://github.com/user-attachments/assets/8b8cb833-a03a-4ee1-8f12-fb6e097c6640" />
 
-- Generates a UE 5.8 Modular Control Rig for a humanoid skeletal mesh, with no hand wiring.
+- Generates a Modular Control Rig for a humanoid skeletal mesh, with no hand wiring. Needs UE 5.7 or later; the 5.6 version of the plugin leaves this page out.
 - Bones are mapped from their names. Optionally, a Blender .rig.json overrides the mapping (see [Blender rig exporter](#blender-rig-exporter) below).
 - The page shows the bone map so you can check it before generating.
 - Creates the modules (Root, Spine, Neck, Shoulder, Arm, Finger, Leg, Foot), plus a Chain module for each face or extra bone.

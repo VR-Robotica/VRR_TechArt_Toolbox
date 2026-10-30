@@ -12,7 +12,7 @@ python Scripts/fab_zip.py 5.7 5.8
 python Scripts/fab_zip.py 5.7 D:/Builds/TechArtToolbox_5.7.zip
 ```
 
-With no version it makes a zip for every version in `VERSIONS` at the top of the script (5.7, 5.8; 5.6 lacks Control Rig and static mesh APIs the plugin uses); add a
+With no version it makes a zip for every version in `VERSIONS` at the top of the script (5.6, 5.7, 5.8; the 5.6 build leaves out the Rig page, which needs 5.7 Control Rig APIs); add a
 version there once the plugin builds and loads on it. Each zip is written to the desktop as
 `TechArtToolbox_<version>.zip` unless a path is given (one version only), and holds one
 `TechArtToolbox/` folder with the uplugin, README, LICENSE, Config, Extras, Resources and Source (no Binaries, Intermediate or

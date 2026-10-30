@@ -4,7 +4,7 @@
 Fab upload zips of the plugin's last commit, one per engine version.
 
     python Scripts/fab_zip.py                         -> a zip for every version in VERSIONS, on the desktop
-    python Scripts/fab_zip.py 5.7 5.8                 -> TechArtToolbox_5.7.zip and _5.8.zip on the desktop
+    python Scripts/fab_zip.py 5.6 5.7                 -> TechArtToolbox_5.6.zip and _5.7.zip on the desktop
     python Scripts/fab_zip.py 5.7 out.zip             -> one version to a chosen path
 
 Zips the committed uplugin, README, LICENSE, Config, Extras, Resources and Source (not the working copy, and never Binaries,
@@ -18,7 +18,7 @@ import zipfile
 
 PLUGIN = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))	# the folder above Scripts/
 SHIPPED = ['TechArtToolbox.uplugin', 'README.md', 'LICENSE', 'Config', 'Extras', 'Resources', 'Source']
-VERSIONS = ['5.7', '5.8']	# engine versions the plugin is built and tested on
+VERSIONS = ['5.6', '5.7', '5.8']	# engine versions the plugin is built and tested on
 
 
 def git(*args):

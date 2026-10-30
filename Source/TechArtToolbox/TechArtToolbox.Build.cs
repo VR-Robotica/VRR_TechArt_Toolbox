@@ -9,6 +9,10 @@ public class TechArtToolbox : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
+		// The Rig page uses Control Rig APIs added in UE 5.7 (ControlRigBlueprintLegacy.h, GetModularRigModel), so 5.6 builds without it
+		bool bWithRig = Target.Version.MajorVersion > 5 || (Target.Version.MajorVersion == 5 && Target.Version.MinorVersion >= 7);
+		PublicDefinitions.Add("TECHARTTOOLBOX_WITH_RIG=" + (bWithRig ? "1" : "0"));
+
 		PublicDependencyModuleNames.AddRange(new string[]
 		{
 			"Core"

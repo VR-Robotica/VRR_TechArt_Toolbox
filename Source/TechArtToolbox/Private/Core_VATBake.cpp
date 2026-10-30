@@ -45,6 +45,7 @@
 #include "MaterialEditingLibrary.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "MeshDescription.h"
+#include "Misc/EngineVersionComparison.h"
 #include "Misc/PackageName.h"
 #include "Misc/ScopedSlowTask.h"
 #include "ObjectTools.h"
@@ -658,7 +659,11 @@ namespace VatBakerImpl
 		Combined->SetNumSourceModels(LODMeshes.Num());
 		Combined->GetSectionInfoMap().Clear();
 		Combined->GetOriginalSectionInfoMap().Clear();
+#if UE_VERSION_OLDER_THAN(5, 7, 0)
+		Combined->bAutoComputeLODScreenSize = false;
+#else
 		Combined->SetAutoComputeLODScreenSize(false);
+#endif
 
 		const USkeletalMesh* SkeletalMesh = Set.SkeletalMesh.Get();
 		TArray<FStaticMaterial> Materials;

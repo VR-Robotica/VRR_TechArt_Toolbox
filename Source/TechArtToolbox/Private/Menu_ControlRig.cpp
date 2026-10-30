@@ -8,6 +8,9 @@
  * This file owns the widgets, the file dialog, and opening the new rig afterwards.
  */
 
+// Not built on UE 5.6: see TECHARTTOOLBOX_WITH_RIG in TechArtToolbox.Build.cs.
+#if TECHARTTOOLBOX_WITH_RIG
+
 #include "Menu_ControlRig.h"
 
 #include "ControlRigBlueprintLegacy.h"
@@ -507,3 +510,5 @@ FReply SMenu_ControlRig::OnGenerateClicked()
 }
 
 #undef LOCTEXT_NAMESPACE
+
+#endif // TECHARTTOOLBOX_WITH_RIG
