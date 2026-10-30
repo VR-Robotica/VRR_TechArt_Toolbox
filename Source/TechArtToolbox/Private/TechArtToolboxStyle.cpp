@@ -1,4 +1,4 @@
-// Copyright VR Robotica. All Rights Reserved.
+// Copyright (c) 2026 VR Robotica. Licensed under the MIT License (see LICENSE).
 
 /*
  * The plugin's Slate style set ("TechArtToolboxStyle"): every brush and button style the Toolbox window uses.

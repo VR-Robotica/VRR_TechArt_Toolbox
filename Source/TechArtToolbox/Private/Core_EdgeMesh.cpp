@@ -1,4 +1,4 @@
-// Copyright VR Robotica. All Rights Reserved.
+// Copyright (c) 2026 VR Robotica. Licensed under the MIT License (see LICENSE).
 
 /*
  * Edge mesh: thin strips that hug a Static Mesh's sharp outer edges, built as their own mesh for decal materials.

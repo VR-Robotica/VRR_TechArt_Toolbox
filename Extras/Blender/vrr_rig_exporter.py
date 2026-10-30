@@ -1,4 +1,6 @@
-# VRR Rig Exporter - writes a JSON description of a hand-built Blender rig for the Unreal "Rig" tab (God Tools).
+# Copyright (c) 2026 VR Robotica. Licensed under the MIT License (see LICENSE).
+#
+# VRR Rig Exporter - writes a JSON description of a hand-built Blender rig for the TechArt Toolbox "Rig" page in Unreal.
 #
 # Setup it understands (the usual Deform Rig + Control Rig split):
 #   - A Deform armature whose deform bones follow a Control armature through Copy Transforms / Rotation / Location.

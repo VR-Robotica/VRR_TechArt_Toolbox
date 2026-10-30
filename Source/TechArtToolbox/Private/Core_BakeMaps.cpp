@@ -1,4 +1,4 @@
-// Copyright VR Robotica. All Rights Reserved.
+// Copyright (c) 2026 VR Robotica. Licensed under the MIT License (see LICENSE).
 
 /*
  * Mesh map baking: Cavity, Edge, Curvature and Ambient Occlusion masks computed from the mesh itself (no high-poly source).

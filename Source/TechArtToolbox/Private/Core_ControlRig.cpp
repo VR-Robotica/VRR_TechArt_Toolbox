@@ -1,4 +1,4 @@
-// Copyright VR Robotica. All Rights Reserved.
+// Copyright (c) 2026 VR Robotica. Licensed under the MIT License (see LICENSE).
 
 /*
  * Control Rig generator: builds a UE 5.8 Modular Control Rig for a skeletal mesh, without hand wiring.
