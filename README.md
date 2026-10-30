@@ -1,6 +1,10 @@
 # UE 5.8 TechArt Toolbox
 
-This is a growing collection of tools created from previous projects working with Unreal. I have migrated them from UE 4.26 and 5.2 Editor Utility Widgets into C++ for UE 5.8 with the assistance of Claude Code to maintain formatting and consistency. These are offered for free use, as is, see the license. New tools will be added sporadically as my projects deem their usefulness.
+This is a growing collection of tools created from previous projects working with Unreal. I have migrated them from UE 4.26 and 5.2 Editor Utility Widgets into C++ for UE 5.8 with the assistance of Claude Code to maintain formatting and consistency. They are free to use under the MIT License (see [LICENSE](LICENSE)). New tools will be added sporadically as my projects deem their usefulness.
+
+Editor only: nothing ships with your game. Supported engines: **5.7, 5.8**. Platforms: Windows, macOS, Linux (editor).
+
+Open it from the **TechArt** menu in the main menu bar, from **Window > TechArt Toolbox**, or with the toolbar button next to Play. Each tool is a page in the window's sidebar.
 
 ## 1. Validate (Asset Validation)
 <img width="1920" height="1080" alt="UE5_TAT_01_AssetValidation" src="https://github.com/user-attachments/assets/31ec74b5-213d-4a8f-8f54-a45f85f29c84" />
@@ -40,7 +44,7 @@ Checks a folder or the Content Browser selection against the project's naming an
 
 - Builds a new, non-overlapping UV channel (usually UV1) from a mesh's existing islands.
 - All islands get the same texel density, with optional rotation for the tightest fit.
-- Each material slot gets its own region of the UV square, or its own UDIM tile. The Vrr UV Region material node reads these region numbers.
+- Each material slot gets its own region of the UV square, or its own UDIM tile. A material can read these region numbers to address each region.
 - Packing options: boxes on shelves, or shape packing where islands nest into each other's gaps. Optional stretch to fill.
 - Balanced layout: one region per island. On static meshes it can be written as the lightmap UVs.
 - Texel Density mode: rescales an existing channel in place to a target px/m, without repacking.
@@ -85,7 +89,7 @@ Checks a folder or the Content Browser selection against the project's naming an
 <img width="1920" height="1080" alt="UE5_TAT_09_CRSetup" src="https://github.com/user-attachments/assets/8b8cb833-a03a-4ee1-8f12-fb6e097c6640" />
 
 - Generates a UE 5.8 Modular Control Rig for a humanoid skeletal mesh, with no hand wiring.
-- Bones are mapped from their names. Optionally, a Blender .rig.json (from vrr_rig_exporter.py) overrides the mapping.
+- Bones are mapped from their names. Optionally, a Blender .rig.json overrides the mapping (see [Blender rig exporter](#blender-rig-exporter) below).
 - The page shows the bone map so you can check it before generating.
 - Creates the modules (Root, Spine, Neck, Shoulder, Arm, Finger, Leg, Foot), plus a Chain module for each face or extra bone.
 - Writes a report of what got connected and what's still open.
@@ -93,7 +97,7 @@ Checks a folder or the Content Browser selection against the project's naming an
 ## 10. VAT (Vertex Animation Textures)
 <img width="1920" height="1080" alt="UE5_TAT_10_VATBaker" src="https://github.com/user-attachments/assets/209ebad8-fc05-44fa-8e4e-8e08ec65c776" />
 
-- Sets up and runs Unreal's AnimToTexture plugin for every LOD, in Bone or Vertex mode.
+- Sets up and runs Unreal's AnimToTexture plugin for every LOD, in Bone mode.
 - You pick a skeletal mesh and the animations to bake. There's a seamless-loop option.
 - It creates:
   - one static mesh and one Data Asset per LOD;
@@ -102,3 +106,54 @@ Checks a folder or the Content Browser selection against the project's naming an
   - a merged SM_<Name> with LOD screen sizes and bounds that cover the animation.
 - Optionally places a preview actor.
 - Re-baking updates the existing instances and the preview actor instead of replacing them.
+- The master material is yours to pick (see [VAT master material](#vat-master-material) below). A default master
+  and the preview actor's class can be set in Project Settings.
+
+## Project Settings
+
+**Project Settings > Plugins > TechArt Toolbox** (saved to `DefaultEditor.ini`, so a team shares them). All optional:
+
+| Setting | Used for |
+|---|---|
+| Default VAT Master Material | The VAT page starts with it, and its **Default** button picks it. |
+| Preview Actor Class | The actor placed to preview a bake. Empty: a plain Static Mesh Actor. |
+| Preview Actor Mesh Variable | Static mesh variable the baked mesh goes into, when the preview actor isn't a Static Mesh Actor. |
+| Preview Selection Component | Component added to the preview actor to switch animations, when the master has a `VAT Selection` scalar. |
+| Preview Selection Component Variable | Name variable on that component that is set to `VAT Selection`. |
+
+## VAT master material
+
+The VAT page fills an instance of any master material that has these parameters (names must match):
+
+- Required: `Rows Per Frame`, `Sample Rate`, `Atlas - MinBBox`, `Atlas - SizeBBox`, `Anim0 - Start Frame`,
+  `Anim0 - End Frame`, `Number of Bones`, `Atlas - Bone Position`, `Atlas - Bone Rotation`, `Atlas - Bone Weights`.
+- Optional: `Anim1..N - Start Frame` / `End Frame` (one pair per extra animation), `VAT Selection`, `Play Rate`,
+  `Time Offset`, `VAT Height Offset`, `VAT Rotation Offset`, `VAT UV Set Selection`, the static switches `UseUV0`-`UseUV3`,
+  `Use Two Influences` and `Use Four Influences`.
+
+In Bone mode, `Rows Per Frame` receives the bone **weight** rows per frame (per LOD). The page's note lists any required
+parameter the picked master is missing.
+
+## Blender rig exporter
+
+`Extras/Blender/vrr_rig_exporter.py` writes a `<name>.rig.json` description of a hand-built Deform + Control rig, which
+the Rig page reads to map limbs, fingers and extra controls. Install it in Blender as an add-on (Edit > Preferences >
+Add-ons > Install from Disk; it appears in the 3D view sidebar's **VRR** tab), or run it headless:
+
+```
+blender -b file.blend --python vrr_rig_exporter.py -- [--deform RIG_DEFORM] [--control RIG_CONTROL] [--out path.json]
+```
+
+Put the .rig.json next to the skeletal mesh (or one folder up) and the Rig page picks it up.
+
+## Installation
+
+Copy the `TechArtToolbox` folder into your project's `Plugins` folder (or install from Fab), then enable
+**TechArt Toolbox** in Edit > Plugins and restart the editor. It turns on the engine's AnimToTexture, Control Rig and
+Control Rig Modules plugins, which the VAT and Rig pages use.
+
+## Support
+
+Report issues at https://github.com/VR-Robotica/TechArtToolbox/issues.
+
+Copyright (c) 2026 VR Robotica. Licensed under the MIT License.
