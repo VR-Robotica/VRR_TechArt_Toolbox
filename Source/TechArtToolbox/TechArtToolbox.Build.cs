@@ -43,6 +43,7 @@ public class TechArtToolbox : ModuleRules
 			"MeshDescription",
 			"PhysicsCore",
 			"Projects",
+			"Settings",					// opening the naming page in Project Settings
 			"PropertyEditor",
 			"RenderCore",
 			"RigVM",

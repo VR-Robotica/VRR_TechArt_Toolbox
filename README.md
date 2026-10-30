@@ -9,7 +9,7 @@ Open it from the **TechArt** menu in the main menu bar, from **Window > TechArt 
 ## 1. Validate (Asset Validation)
 <img width="1920" height="1080" alt="UE5_TAT_01_AssetValidation" src="https://github.com/user-attachments/assets/31ec74b5-213d-4a8f-8f54-a45f85f29c84" />
 
-Checks a folder or the Content Browser selection against the project's naming and asset rules.
+Checks a folder or the Content Browser selection against the project's naming and asset rules. The names below are the defaults; every prefix and suffix can be changed to your project's convention (see [Asset naming conventions](#asset-naming-conventions)).
 - Textures:
   - The suffix decides the expected settings (_D, _N, _ORM, _H…): sRGB, compression, size, mips and streaming.
   - Curve atlases (CA_), VATs (VAT_) and virtual textures (VT_) each get their own rules.
@@ -108,6 +108,31 @@ Checks a folder or the Content Browser selection against the project's naming an
 - Re-baking updates the existing instances and the preview actor instead of replacing them.
 - The master material is yours to pick (see [VAT master material](#vat-master-material) below). A default master
   and the preview actor's class can be set in Project Settings.
+
+## Asset naming conventions
+
+**Project Settings > Plugins > TechArt Toolbox Asset Naming** (or **Naming Conventions...** on the Validate page) holds every
+name the Validate page checks and renames to. It's saved to `DefaultEditor.ini`, so a team shares it. The defaults follow
+Unreal's common convention; each property's reset arrow puts its default back.
+
+| Setting | Default |
+|---|---|
+| Texture, Virtual Texture, Vertex Animation Texture, Curve Atlas prefixes | `T_`, `VT_`, `VAT_`, `CA_` |
+| Suffixes: each known suffix and what it holds (Color, Normal Map, Packed Mask, Single Channel, Heightmap, or Any) | `D`, `N`, `ORM`, `R`, `M`, `AO`, `H`... |
+| Suffix aliases: other conventions' suffixes, and the known suffix Fix All renames them to | `Albedo` -> `D`, `Nrm` -> `N`... |
+| Vertex animation name parts (mark a VAT without its prefix) | `BonePos`, `BoneRot`, `BoneWeights`, `VertexPos`, `VertexNormal` |
+| Fix All suffixes for color, normal and opacity, and the ambiguous suffix (color or opacity) | `D`, `N`, `O`, `A` |
+| Static Mesh, Skeletal Mesh prefixes | `SM_`; `SK_`, `SKM_` |
+| Skeleton, Physics Asset prefixes | `SKEL_`, `PHYS_` |
+| Material, Material Instance, Material Function, Material Layer prefixes | `M_`, `MI_`, `MF_`, `ML_` |
+| Post Process Material, Post Process Material Instance prefixes | `PPM_`, `PPMI_` |
+
+Prefixes are case-sensitive and include their underscore; suffixes leave it out. Where a list allows several prefixes,
+any of them passes and Fix All adds the first. An empty prefix turns that check off. The suffix table also decides the
+texture settings checks, so a `_BaseColor` convention means adding `BaseColor` as a Color suffix (and removing its alias).
+
+The other pages name their output with the default convention (`T_<Mesh>_CCE`, `VAT_...`); rename after baking if your
+convention differs.
 
 ## Project Settings
 

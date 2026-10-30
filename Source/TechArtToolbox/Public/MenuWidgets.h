@@ -92,8 +92,8 @@ namespace VrrMenu
 
 	// FIELDS
 
-	/** Checkbox that reads and writes *bValue directly. */
-	TSharedRef<SWidget> CheckBox(bool* bValue, const FText& Text, const FText& ToolTip);
+	/** Checkbox that reads and writes *bValue directly. The tooltip may be live (a lambda). */
+	TSharedRef<SWidget> CheckBox(bool* bValue, const FText& Text, const TAttribute<FText>& ToolTip);
 
 	/** Float spin box bound to *Value. */
 	TSharedRef<SWidget> FloatField(float* Value, float Min, float Max, float Delta);

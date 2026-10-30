@@ -2,6 +2,7 @@
 
 /*
  * Mesh validation: checks Static and Skeletal Mesh assets against the project's mesh rules.
+ * Prefixes come from Project Settings > Plugins > TechArt Toolbox Asset Naming; the ones below are its defaults.
  *
  * Strategy (like the texture validator)
  *  - The prefix says what the asset is: SM_ static mesh, SK_ (or SKM_) skeletal mesh. A skeletal mesh's
@@ -26,6 +27,7 @@
 #include "PhysicsEngine/PhysicsAsset.h"
 #include "Rendering/SkeletalMeshLODRenderData.h"
 #include "Rendering/SkeletalMeshRenderData.h"
+#include "TechArtToolboxNamingSettings.h"
 
 #define LOCTEXT_NAMESPACE "MeshValidator"
 
@@ -33,53 +35,63 @@ namespace MeshValidator
 {
 	using ESeverity = FAssetIssue::ESeverity;
 
-	/** Prefixes a mesh may start with. */
-	const TCHAR* const StaticPrefixes[] = { TEXT("SM_") };
-	const TCHAR* const SkeletalPrefixes[] = { TEXT("SK_"), TEXT("SKM_") };
-	/** Prefixes of the assets a skeletal mesh points to, and of assigned materials. */
-	const TCHAR* const SkeletonPrefix = TEXT("SKEL_");
-	const TCHAR* const PhysicsPrefix = TEXT("PHYS_");
-	const TCHAR* const MaterialPrefixes[] = { TEXT("M_"), TEXT("MI_") };
+	using FNaming = UTechArtToolboxNamingSettings;
 
-	/** The prefix Name starts with (case-sensitive, as the convention is), or empty. */
-	template <SIZE_T N>
-	FString FindPrefix(const FString& Name, const TCHAR* const (&Prefixes)[N])
+	/** The prefixes for each asset, from the project's naming settings (empty entries dropped). */
+	TArray<FString> StaticPrefixes()	{ return FNaming::NonEmpty(FNaming::Get().StaticMeshPrefixes); }
+	TArray<FString> SkeletalPrefixes()	{ return FNaming::NonEmpty(FNaming::Get().SkeletalMeshPrefixes); }
+	/** Materials a mesh slot may use: material and material instance prefixes. */
+	TArray<FString> MaterialPrefixes()
 	{
-		for (const TCHAR* Prefix : Prefixes)
+		TArray<FString> Prefixes = FNaming::NonEmpty(FNaming::Get().MaterialPrefixes);
+		for (const FString& Prefix : FNaming::NonEmpty(FNaming::Get().MaterialInstancePrefixes))
 		{
-			if (Name.StartsWith(Prefix, ESearchCase::CaseSensitive))
-			{
-				return Prefix;
-			}
+			Prefixes.AddUnique(Prefix);
 		}
-		return FString();
+		return Prefixes;
 	}
 
-	template <SIZE_T N>
-	FString JoinPrefixes(const TCHAR* const (&Prefixes)[N], const TCHAR* Separator)
+	/** The longest prefix of the list that Name starts with (case-sensitive, as the convention is), or empty. */
+	FString FindPrefix(const FString& Name, const TArray<FString>& Prefixes)
 	{
-		TArray<FString> Names;
-		for (const TCHAR* Prefix : Prefixes)
-		{
-			Names.Add(Prefix);
-		}
-		return FString::Join(Names, Separator);
+		return FNaming::FindPrefix(Name, Prefixes);
+	}
+
+	FString JoinPrefixes(const TArray<FString>& Prefixes)
+	{
+		return FString::Join(Prefixes, TEXT(" or "));
 	}
 
 	FString GetPrefixList()
 	{
-		return FString::Printf(TEXT("%s (Static Mesh), %s (Skeletal Mesh), %s (Skeleton), %s (Physics Asset); materials %s"),
-			*JoinPrefixes(StaticPrefixes, TEXT(" or ")), *JoinPrefixes(SkeletalPrefixes, TEXT(" or ")), SkeletonPrefix, PhysicsPrefix,
-			*JoinPrefixes(MaterialPrefixes, TEXT(" or ")));
+		const FNaming& Naming = FNaming::Get();
+		TArray<FString> Parts;
+		auto Add = [&Parts](const FString& Prefixes, const TCHAR* What)
+		{
+			if (!Prefixes.IsEmpty())
+			{
+				Parts.Add(FString::Printf(TEXT("%s (%s)"), *Prefixes, What));
+			}
+		};
+		Add(JoinPrefixes(StaticPrefixes()), TEXT("Static Mesh"));
+		Add(JoinPrefixes(SkeletalPrefixes()), TEXT("Skeletal Mesh"));
+		Add(Naming.SkeletonPrefix.TrimStartAndEnd(), TEXT("Skeleton"));
+		Add(Naming.PhysicsAssetPrefix.TrimStartAndEnd(), TEXT("Physics Asset"));
+		const FString Materials = JoinPrefixes(MaterialPrefixes());
+		return FString::Join(Parts, TEXT(", ")) + (Materials.IsEmpty() ? FString() : TEXT("; materials ") + Materials);
 	}
 
 	/**
 	 * Name for a skeleton or physics asset: Prefix + the name without a mesh prefix or Unreal's default suffix
 	 * (SK_Hero_Skeleton -> SKEL_Hero, SK_Hero_PhysicsAsset -> PHYS_Hero). Empty if nothing is left.
 	 */
-	FString MakeLinkedAssetName(FString Name, const TCHAR* Prefix, const TCHAR* DefaultSuffix)
+	FString MakeLinkedAssetName(FString Name, const FString& Prefix, const TCHAR* DefaultSuffix)
 	{
-		const FString MeshPrefix = FindPrefix(Name, SkeletalPrefixes) + FindPrefix(Name, StaticPrefixes);
+		FString MeshPrefix = FindPrefix(Name, SkeletalPrefixes());
+		if (MeshPrefix.IsEmpty())
+		{
+			MeshPrefix = FindPrefix(Name, StaticPrefixes());
+		}
 		Name.RemoveFromStart(MeshPrefix);
 		Name.RemoveFromEnd(DefaultSuffix, ESearchCase::IgnoreCase);
 		const FString Body = AssetValidation::CleanNameBody(Name);
@@ -116,25 +128,28 @@ namespace MeshValidator
 		if (Settings.bCheckNaming)
 		{
 			const FText Rule = LOCTEXT("RuleNaming", "Naming");
-			const FString Prefix = StaticMesh ? FindPrefix(Name, StaticPrefixes) : FindPrefix(Name, SkeletalPrefixes);
-			const FString WrongPrefix = Prefix.IsEmpty() ? (StaticMesh ? FindPrefix(Name, SkeletalPrefixes) : FindPrefix(Name, StaticPrefixes)) : FString();
+			const TArray<FString> OwnPrefixes = StaticMesh ? StaticPrefixes() : SkeletalPrefixes();
+			const TArray<FString> OtherPrefixes = StaticMesh ? SkeletalPrefixes() : StaticPrefixes();
+			const FString Prefix = FindPrefix(Name, OwnPrefixes);
+			const FString WrongPrefix = Prefix.IsEmpty() ? FindPrefix(Name, OtherPrefixes) : FString();
 			const FString Body = Name.Mid(Prefix.Len() + WrongPrefix.Len());
 
 			// The name both naming issues fix to: the right prefix (kept, swapped or added) and a clean body
 			const FString CleanBody = AssetValidation::CleanNameBody(Body);
-			const FString WantedPrefix = Prefix.IsEmpty() ? FString(StaticMesh ? StaticPrefixes[0] : SkeletalPrefixes[0]) : Prefix;
+			const FString WantedPrefix = Prefix.IsEmpty() ? FNaming::First(OwnPrefixes) : Prefix;
 			const FString FixedName = CleanBody.IsEmpty() ? FString() : WantedPrefix + CleanBody;
 
 			// No prefix we know: the first part may be another convention's (Mesh_Rock): keep it, or replace it
 			const FString WithoutFirst = Prefix.IsEmpty() && WrongPrefix.IsEmpty() ? AssetValidation::RemoveFirstToken(Body) : FString();
 			const FString Names[2][2] = { { FixedName, FString() }, { WithoutFirst.IsEmpty() ? FString() : WantedPrefix + WithoutFirst, FString() } };
 
-			if (Prefix.IsEmpty())
+			if (Prefix.IsEmpty() && OwnPrefixes.Num() > 0)	// no prefixes set for this type: no prefix check
 			{
 				// The other type's prefix is a clearer message than "missing prefix"
+				const FText Wanted = FText::FromString(JoinPrefixes(OwnPrefixes));
 				AddIssue(ESeverity::Warning, Rule, !WrongPrefix.IsEmpty()
-					? (StaticMesh ? LOCTEXT("SkeletalPrefixOnStatic", "Skeletal mesh prefix on a static mesh (use SM_)") : LOCTEXT("StaticPrefixOnSkeletal", "Static mesh prefix on a skeletal mesh (use SK_)"))
-					: (StaticMesh ? LOCTEXT("MissingStaticPrefix", "Name should start with SM_") : LOCTEXT("MissingSkeletalPrefix", "Name should start with SK_")));
+					? FText::Format(StaticMesh ? LOCTEXT("SkeletalPrefixOnStatic", "Skeletal mesh prefix on a static mesh (use {0})") : LOCTEXT("StaticPrefixOnSkeletal", "Static mesh prefix on a skeletal mesh (use {0})"), Wanted)
+					: FText::Format(LOCTEXT("MissingMeshPrefix", "Name should start with {0}"), Wanted));
 				AssetValidation::SetRenameChoices(OutIssues.Last(), Name, Names);
 			}
 			const FText BodyProblem = AssetValidation::GetNameBodyProblem(Body);
@@ -146,17 +161,21 @@ namespace MeshValidator
 			// The skeleton and physics asset a skeletal mesh uses
 			if (SkeletalMesh)
 			{
+				const FString SkeletonPrefix = FNaming::Get().SkeletonPrefix.TrimStartAndEnd();
+				const FString PhysicsPrefix = FNaming::Get().PhysicsAssetPrefix.TrimStartAndEnd();
 				const USkeleton* Skeleton = SkeletalMesh->GetSkeleton();
-				if (IsProjectContent(Skeleton) && !Skeleton->GetName().StartsWith(SkeletonPrefix, ESearchCase::CaseSensitive))
+				if (IsProjectContent(Skeleton) && !SkeletonPrefix.IsEmpty() && !FNaming::HasPrefix(Skeleton->GetName(), SkeletonPrefix))
 				{
-					FAssetIssue& Issue = AddIssue(ESeverity::Warning, Rule, FText::Format(LOCTEXT("SkeletonPrefix", "Skeleton {0} should start with SKEL_"), FText::FromString(Skeleton->GetName())));
+					FAssetIssue& Issue = AddIssue(ESeverity::Warning, Rule, FText::Format(LOCTEXT("SkeletonPrefix", "Skeleton {0} should start with {1}"),
+						FText::FromString(Skeleton->GetName()), FText::FromString(SkeletonPrefix)));
 					Issue.RenameTo = MakeLinkedAssetName(Skeleton->GetName(), SkeletonPrefix, TEXT("_Skeleton"));
 					Issue.RenameObject = FSoftObjectPath(Skeleton);
 				}
 				const UPhysicsAsset* Physics = SkeletalMesh->GetPhysicsAsset();
-				if (IsProjectContent(Physics) && !Physics->GetName().StartsWith(PhysicsPrefix, ESearchCase::CaseSensitive))
+				if (IsProjectContent(Physics) && !PhysicsPrefix.IsEmpty() && !FNaming::HasPrefix(Physics->GetName(), PhysicsPrefix))
 				{
-					FAssetIssue& Issue = AddIssue(ESeverity::Warning, Rule, FText::Format(LOCTEXT("PhysicsPrefix", "Physics asset {0} should start with PHYS_"), FText::FromString(Physics->GetName())));
+					FAssetIssue& Issue = AddIssue(ESeverity::Warning, Rule, FText::Format(LOCTEXT("PhysicsPrefix", "Physics asset {0} should start with {1}"),
+						FText::FromString(Physics->GetName()), FText::FromString(PhysicsPrefix)));
 					Issue.RenameTo = MakeLinkedAssetName(Physics->GetName(), PhysicsPrefix, TEXT("_PhysicsAsset"));
 					Issue.RenameObject = FSoftObjectPath(Physics);
 				}
@@ -167,6 +186,7 @@ namespace MeshValidator
 		if (Settings.bCheckMaterials)
 		{
 			const FText Rule = LOCTEXT("RuleMaterials", "Materials");
+			const TArray<FString> SlotPrefixes = MaterialPrefixes();
 			auto CheckSlot = [&](int32 Index, FName SlotName, const UMaterialInterface* Material)
 			{
 				const FText Slot = SlotName.IsNone() ? FText::AsNumber(Index) : FText::Format(LOCTEXT("SlotNamed", "{0} ({1})"), Index, FText::FromName(SlotName));
@@ -174,9 +194,10 @@ namespace MeshValidator
 				{
 					AddIssue(ESeverity::Warning, Rule, FText::Format(LOCTEXT("NoMaterial", "Slot {0} has no material (renders with the default material)"), Slot));
 				}
-				else if (IsProjectContent(Material) && FindPrefix(Material->GetName(), MaterialPrefixes).IsEmpty())
+				else if (IsProjectContent(Material) && SlotPrefixes.Num() > 0 && FindPrefix(Material->GetName(), SlotPrefixes).IsEmpty())
 				{
-					AddIssue(ESeverity::Warning, Rule, FText::Format(LOCTEXT("MaterialPrefix", "Slot {0}: material {1} should start with M_ or MI_"), Slot, FText::FromString(Material->GetName())));
+					AddIssue(ESeverity::Warning, Rule, FText::Format(LOCTEXT("MaterialPrefix", "Slot {0}: material {1} should start with {2}"),
+						Slot, FText::FromString(Material->GetName()), FText::FromString(JoinPrefixes(SlotPrefixes))));
 				}
 			};
 			if (StaticMesh)

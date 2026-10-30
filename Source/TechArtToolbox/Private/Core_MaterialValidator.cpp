@@ -2,6 +2,7 @@
 
 /*
  * Material validation: checks material assets against the project's naming rules.
+ * Prefixes come from Project Settings > Plugins > TechArt Toolbox Asset Naming; the ones below are its defaults.
  *
  * Strategy (like the mesh validator)
  *  - The prefix says what the asset is: M_ material (master material), MI_ material instance,
@@ -25,6 +26,7 @@
 #include "Materials/MaterialFunctionMaterialLayerBlend.h"
 #include "Materials/MaterialInstance.h"
 #include "Misc/PackageName.h"
+#include "TechArtToolboxNamingSettings.h"
 
 #define LOCTEXT_NAMESPACE "MaterialValidator"
 
@@ -36,12 +38,7 @@ namespace MaterialValidator
 
 	constexpr EKind AllKinds[] = { EKind::Material, EKind::Instance, EKind::Function, EKind::PostProcess, EKind::PostProcessInstance };
 
-	/** Prefixes each kind may start with (case-sensitive, as the convention is). */
-	const TCHAR* const MaterialPrefixes[] = { TEXT("M_") };
-	const TCHAR* const InstancePrefixes[] = { TEXT("MI_") };
-	const TCHAR* const FunctionPrefixes[] = { TEXT("MF_"), TEXT("ML_") };
-	const TCHAR* const PostProcessPrefixes[] = { TEXT("PPM_") };
-	const TCHAR* const PostProcessInstancePrefixes[] = { TEXT("PPMI_") };
+	using FNaming = UTechArtToolboxNamingSettings;
 
 	/** Leading part of an old post process name that the PPM_/PPMI_ prefix replaces (M_PP_CelShadow -> PPM_CelShadow). */
 	const TCHAR* const OldPostProcessTag = TEXT("PP_");
@@ -88,10 +85,10 @@ namespace MaterialValidator
 	 * The post process kind if the domain says so. If the domain can't be read (tag missing, parent not found),
 	 * a PPM_/PPMI_ name is trusted rather than flagged.
 	 */
-	EKind PickKind(EDomain Domain, const FAssetData& Asset, EKind Normal, EKind PostProcess, const TCHAR* PostProcessPrefix)
+	EKind PickKind(EDomain Domain, const FAssetData& Asset, EKind Normal, EKind PostProcess, const TArray<FString>& PostProcessPrefixes)
 	{
 		if (Domain == EDomain::PostProcess
-			|| (Domain == EDomain::Unknown && Asset.AssetName.ToString().StartsWith(PostProcessPrefix, ESearchCase::CaseSensitive)))
+			|| (Domain == EDomain::Unknown && !FNaming::FindPrefix(Asset.AssetName.ToString(), PostProcessPrefixes).IsEmpty()))
 		{
 			return PostProcess;
 		}
@@ -102,11 +99,11 @@ namespace MaterialValidator
 	{
 		if (Asset.IsInstanceOf(UMaterial::StaticClass()))
 		{
-			return PickKind(GetMaterialDomain(Asset), Asset, EKind::Material, EKind::PostProcess, PostProcessPrefixes[0]);
+			return PickKind(GetMaterialDomain(Asset), Asset, EKind::Material, EKind::PostProcess, FNaming::Get().PostProcessMaterialPrefixes);
 		}
 		if (Asset.IsInstanceOf(UMaterialInstance::StaticClass()))
 		{
-			return PickKind(GetInstanceDomain(Asset), Asset, EKind::Instance, EKind::PostProcessInstance, PostProcessInstancePrefixes[0]);
+			return PickKind(GetInstanceDomain(Asset), Asset, EKind::Instance, EKind::PostProcessInstance, FNaming::Get().PostProcessInstancePrefixes);
 		}
 		if (Asset.IsInstanceOf(UMaterialFunctionInterface::StaticClass()))
 		{
@@ -115,15 +112,22 @@ namespace MaterialValidator
 		return EKind::None;
 	}
 
-	TConstArrayView<const TCHAR*> GetPrefixes(EKind Kind)
+	/** Prefixes each kind may start with (case-sensitive, as the convention is), from the naming settings. Functions accept function and layer prefixes. */
+	TArray<FString> GetPrefixes(EKind Kind)
 	{
+		const FNaming& Naming = FNaming::Get();
 		switch (Kind)
 		{
-		case EKind::Material:	return MaterialPrefixes;
-		case EKind::Instance:	return InstancePrefixes;
-		case EKind::Function:	return FunctionPrefixes;
-		case EKind::PostProcess:	return PostProcessPrefixes;
-		case EKind::PostProcessInstance:	return PostProcessInstancePrefixes;
+		case EKind::Material:	return FNaming::NonEmpty(Naming.MaterialPrefixes);
+		case EKind::Instance:	return FNaming::NonEmpty(Naming.MaterialInstancePrefixes);
+		case EKind::Function:
+		{
+			TArray<FString> Prefixes = Naming.MaterialFunctionPrefixes;
+			Prefixes.Append(Naming.MaterialLayerPrefixes);
+			return FNaming::NonEmpty(Prefixes);
+		}
+		case EKind::PostProcess:	return FNaming::NonEmpty(Naming.PostProcessMaterialPrefixes);
+		case EKind::PostProcessInstance:	return FNaming::NonEmpty(Naming.PostProcessInstancePrefixes);
 		default:				return {};
 		}
 	}
@@ -147,24 +151,29 @@ namespace MaterialValidator
 		return FString::Join(GetPrefixes(Kind), TEXT(" or "));
 	}
 
-	/** The prefix Name starts with, or empty. */
+	/** The longest of the kind's prefixes that Name starts with, or empty. */
 	FString FindPrefix(const FString& Name, EKind Kind)
 	{
-		for (const TCHAR* Prefix : GetPrefixes(Kind))
-		{
-			if (Name.StartsWith(Prefix, ESearchCase::CaseSensitive))
-			{
-				return Prefix;
-			}
-		}
-		return FString();
+		return FNaming::FindPrefix(Name, GetPrefixes(Kind));
 	}
 
 	FString GetPrefixList()
 	{
-		return FString::Printf(TEXT("%s (Material), %s (Material Instance), %s (Material Function), %s (Post Process Material), %s (Post Process Material Instance)"),
-			*JoinPrefixes(EKind::Material), *JoinPrefixes(EKind::Instance), *JoinPrefixes(EKind::Function),
-			*JoinPrefixes(EKind::PostProcess), *JoinPrefixes(EKind::PostProcessInstance));
+		TArray<FString> Parts;
+		auto Add = [&Parts](EKind Kind, const TCHAR* What)
+		{
+			const FString Prefixes = JoinPrefixes(Kind);
+			if (!Prefixes.IsEmpty())
+			{
+				Parts.Add(FString::Printf(TEXT("%s (%s)"), *Prefixes, What));
+			}
+		};
+		Add(EKind::Material, TEXT("Material"));
+		Add(EKind::Instance, TEXT("Material Instance"));
+		Add(EKind::Function, TEXT("Material Function"));
+		Add(EKind::PostProcess, TEXT("Post Process Material"));
+		Add(EKind::PostProcessInstance, TEXT("Post Process Material Instance"));
+		return FString::Join(Parts, TEXT(", "));
 	}
 
 	bool IsMaterialAsset(const FAssetData& Asset)
@@ -210,15 +219,22 @@ namespace MaterialValidator
 		return Number.IsEmpty() ? Name.Left(SuffixAt) : Name.Left(SuffixAt) + TEXT("_") + Number;
 	}
 
-	/** The prefix a name without one gets: ML_ for material layers and layer blends, else the kind's first prefix. */
+	/**
+	 * The prefix a name without one gets: the first layer prefix for material layers and layer blends, the first
+	 * function prefix for other functions (each falls back on the other), else the kind's first prefix. Empty if none is set.
+	 */
 	FString GetDefaultPrefix(const FAssetData& Asset, EKind Kind)
 	{
-		if (Kind == EKind::Function && (Asset.IsInstanceOf(UMaterialFunctionMaterialLayer::StaticClass())
-			|| Asset.IsInstanceOf(UMaterialFunctionMaterialLayerBlend::StaticClass())))
+		if (Kind == EKind::Function)
 		{
-			return FunctionPrefixes[1];
+			const FNaming& Naming = FNaming::Get();
+			const bool bLayer = Asset.IsInstanceOf(UMaterialFunctionMaterialLayer::StaticClass())
+				|| Asset.IsInstanceOf(UMaterialFunctionMaterialLayerBlend::StaticClass());
+			const FString Layer = FNaming::First(Naming.MaterialLayerPrefixes);
+			const FString Function = FNaming::First(Naming.MaterialFunctionPrefixes);
+			return bLayer ? (Layer.IsEmpty() ? Function : Layer) : (Function.IsEmpty() ? Layer : Function);
 		}
-		return GetPrefixes(Kind)[0];
+		return FNaming::First(GetPrefixes(Kind));
 	}
 
 	/** The other kind whose prefix Name starts with (an M_ instance, an MI_ material...), or None. */
@@ -292,7 +308,8 @@ namespace MaterialValidator
 		else if (!WithoutInst.IsEmpty())
 		{
 			// Only the suffix check: still swap the parent's M_ for MI_ (PPM_ for PPMI_) so the instance doesn't take its parent's name
-			FixedName = WrongKind != EKind::None && WrongKind == GetParentKind(Kind) ? GetPrefixes(Kind)[0] + Body : WithoutInst;
+			const FString OwnPrefix = FNaming::First(GetPrefixes(Kind));
+			FixedName = WrongKind != EKind::None && WrongKind == GetParentKind(Kind) && !OwnPrefix.IsEmpty() ? OwnPrefix + Body : WithoutInst;
 		}
 
 		// 3. Issues
@@ -313,7 +330,7 @@ namespace MaterialValidator
 			AddIssue(Rule, FText::Format(LOCTEXT("WrongKindPrefix", "Named like a {0} ({1}) but this is a {2} (use {3})"),
 				GetKindName(WrongKind), FText::FromString(WrongPrefix), GetKindName(Kind), FText::FromString(JoinPrefixes(Kind))));
 		}
-		else if (Prefix.IsEmpty())
+		else if (Prefix.IsEmpty() && GetPrefixes(Kind).Num() > 0)	// no prefixes set for this kind: no prefix check
 		{
 			AddIssue(Rule, FText::Format(LOCTEXT("MissingPrefix", "Name should start with {0}"), FText::FromString(JoinPrefixes(Kind))));
 		}

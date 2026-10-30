@@ -3,9 +3,12 @@
 /*
  * Texture validation: checks texture assets against the project's texture rules.
  *
+ * Every prefix and suffix comes from Project Settings > Plugins > TechArt Toolbox Asset Naming
+ * (UTechArtToolboxNamingSettings); the names below are its defaults.
+ *
  * Strategy
  *  - The name suffix says what a texture holds (T_Rock_N = normal map, T_Rock_ORM = packed mask...).
- *    SuffixRules maps each known suffix to a kind (color, normal, mask, single channel).
+ *    The naming settings' suffix table maps each known suffix to a kind (color, normal, mask, single channel).
  *  - Each check compares the texture's real settings with what its kind needs: sRGB only for color data,
  *    a compression that fits the data, a sensible size, and mips/streaming for anything that isn't UI.
  *  - Curve atlases (CA_) are linear lookup tables and get their own rules: sRGB off, uncompressed, no mips,
@@ -35,74 +38,51 @@
 #include "Curves/CurveLinearColorAtlas.h"
 #include "Engine/Texture2D.h"
 #include "ImageCore.h"
+#include "TechArtToolboxNamingSettings.h"
 
 #define LOCTEXT_NAMESPACE "TextureValidator"
 
 namespace TextureValidator
 {
-	/** What a name suffix says the texture holds. Any = accept any settings (tool outputs with their own rules). */
-	enum class EKind : uint8 { Color, Normal, Mask, Single, Height, Any };
+	using EKind = ETatTextureKind;
+	using FSuffixRule = FTatTextureSuffix;
+	using FNaming = UTechArtToolboxNamingSettings;
 
-	/** One known suffix and the kind of data it means. */
-	struct FSuffixRule
+	/** The project's naming convention (Project Settings > Plugins > TechArt Toolbox Asset Naming). */
+	const FNaming& Naming()
 	{
-		const TCHAR* Suffix;
-		EKind Kind;
-	};
+		return FNaming::Get();
+	}
 
-	/** Every suffix the validator knows. Add new suffixes here; the Validate page tooltip lists them. */
-	const FSuffixRule SuffixRules[] =
+	/** Takes Prefix off the start of Name if it's there (never for an empty prefix). */
+	bool RemovePrefix(FString& Name, const FString& Prefix, ESearchCase::Type Case = ESearchCase::CaseSensitive)
 	{
-		// Color data (sRGB). Diffuse, albedo and base color are all _D (the other names are SuffixAliases)
-		{ TEXT("D"), EKind::Color }, { TEXT("E"), EKind::Color }, { TEXT("Emissive"), EKind::Color },
-		// Normal maps
-		{ TEXT("N"), EKind::Normal }, { TEXT("Normal"), EKind::Normal },
-		// Packed masks (linear, several channels)
-		{ TEXT("ORM"), EKind::Mask }, { TEXT("MRA"), EKind::Mask }, { TEXT("RMA"), EKind::Mask },
-		{ TEXT("Mask"), EKind::Mask }, { TEXT("MSK"), EKind::Mask }, { TEXT("CCE"), EKind::Mask },	// CCE: Curvature/Cavity/Edge (Toolbox > Mesh Maps)
-		// Single-channel data (linear)
-		{ TEXT("R"), EKind::Single }, { TEXT("Rough"), EKind::Single }, { TEXT("M"), EKind::Single },
-		{ TEXT("Metal"), EKind::Single }, { TEXT("AO"), EKind::Single },
-		{ TEXT("O"), EKind::Single }, { TEXT("Opacity"), EKind::Single },
-		{ TEXT("Curvature"), EKind::Single }, { TEXT("Cavity"), EKind::Single }, { TEXT("Edge"), EKind::Single },
-		{ TEXT("S"), EKind::Single }, { TEXT("Spec"), EKind::Single }, { TEXT("OM"), EKind::Single },	// Specular, Opacity Mask (Toolbox > Consolidate)
-		// Heightmaps (linear, single channel, displacement compression)
-		{ TEXT("H"), EKind::Height }, { TEXT("Height"), EKind::Height },
-		// Texture Packer output: any compression is fine
-		{ TEXT("Packed"), EKind::Any },
-		{ TEXT("SmoothN"), EKind::Any },
-	};
+		if (Prefix.IsEmpty() || !Name.StartsWith(Prefix, Case))
+		{
+			return false;
+		}
+		Name.RightChopInline(Prefix.Len());
+		return true;
+	}
 
 	/** The rule for a suffix (case-insensitive), or null for an unknown one. */
 	const FSuffixRule* FindSuffixRule(const FString& Suffix)
 	{
-		for (const FSuffixRule& Rule : SuffixRules)
-		{
-			if (Suffix.Equals(Rule.Suffix, ESearchCase::IgnoreCase))
-			{
-				return &Rule;
-			}
-		}
-		return nullptr;
+		return Naming().FindSuffix(Suffix);
 	}
 
-	/** Prefixes of regular, virtual and vertex animation textures. */
-	const TCHAR* const TexturePrefix = TEXT("T_");
-	const TCHAR* const VirtualPrefix = TEXT("VT_");
-	const TCHAR* const VATPrefix = TEXT("VAT_");
-
-	/** Name parts the VAT bake (Toolbox > VAT) and AnimToTexture give their textures. */
-	const TCHAR* const VATSuffixes[] = { TEXT("BonePos"), TEXT("BoneRot"), TEXT("BoneWeights"), TEXT("VertexPos"), TEXT("VertexNormal") };
-
-	/** The ambiguous suffix: albedo or alpha. */
-	const TCHAR* const AmbiguousSuffix = TEXT("A");
+	/** A suffix setting as it goes into names ("D"). */
+	FString Clean(const FString& Suffix)
+	{
+		return FNaming::CleanSuffix(Suffix);
+	}
 
 	/** "T_Rock_N_01" or "VT_Rock_N_01" -> "N" (strips the prefix and a trailing number). Empty when there is no suffix. */
 	FString GetNameSuffix(FString Name)
 	{
-		if (!Name.RemoveFromStart(VirtualPrefix))
+		if (!RemovePrefix(Name, Naming().VirtualTexturePrefix))
 		{
-			Name.RemoveFromStart(TexturePrefix);
+			RemovePrefix(Name, Naming().TexturePrefix, ESearchCase::IgnoreCase);
 		}
 
 		int32 Underscore;
@@ -114,57 +94,31 @@ namespace TextureValidator
 		return Name.FindLastChar(TEXT('_'), Underscore) ? Name.Mid(Underscore + 1) : FString();
 	}
 
-	/** Common suffixes from other tools and habits, and the known suffix each one means. */
-	const TPair<const TCHAR*, const TCHAR*> SuffixAliases[] =
-	{
-		{ TEXT("Diffuse"), TEXT("D") }, { TEXT("Diff"), TEXT("D") }, { TEXT("Dif"), TEXT("D") }, { TEXT("Albedo"), TEXT("D") }, { TEXT("Alb"), TEXT("D") },
-		{ TEXT("BaseColor"), TEXT("D") }, { TEXT("BC"), TEXT("D") }, { TEXT("Col"), TEXT("D") }, { TEXT("Color"), TEXT("D") }, { TEXT("Colour"), TEXT("D") },
-		{ TEXT("Nrm"), TEXT("N") }, { TEXT("Norm"), TEXT("N") }, { TEXT("Nor"), TEXT("N") }, { TEXT("NormalMap"), TEXT("N") }, { TEXT("NM"), TEXT("N") },
-		{ TEXT("Rgh"), TEXT("R") }, { TEXT("Roughness"), TEXT("R") },
-		{ TEXT("Met"), TEXT("M") }, { TEXT("Metallic"), TEXT("M") }, { TEXT("Metalness"), TEXT("M") },
-		{ TEXT("Occ"), TEXT("AO") }, { TEXT("Occlusion"), TEXT("AO") }, { TEXT("AmbientOcclusion"), TEXT("AO") },
-		{ TEXT("Disp"), TEXT("H") }, { TEXT("Displacement"), TEXT("H") }, { TEXT("Bump"), TEXT("H") },
-		{ TEXT("Emit"), TEXT("E") }, { TEXT("Emission"), TEXT("E") }, { TEXT("Glow"), TEXT("E") },
-		{ TEXT("Alpha"), TEXT("O") }, { TEXT("Opac"), TEXT("O") },
-		{ TEXT("Specular"), TEXT("S") }, { TEXT("OpacityMask"), TEXT("OM") },
-		{ TEXT("Masks"), TEXT("Mask") },
-	};
-
 	/**
 	 * The known suffix a texture should get: what its unknown suffix is an alias of, else what its settings say
-	 * (normal map compression -> N, sRGB color -> D). Empty when there's no safe guess (masks, single channels).
+	 * (normal map compression -> the normal suffix, sRGB color -> the color suffix). Empty when there's no safe guess.
 	 */
-	/** The known suffix an alias stands for (_Albedo -> D), or null. */
-	const TCHAR* FindAlias(const FString& Suffix)
-	{
-		for (const TPair<const TCHAR*, const TCHAR*>& Alias : SuffixAliases)
-		{
-			if (Suffix.Equals(Alias.Key, ESearchCase::IgnoreCase))
-			{
-				return Alias.Value;
-			}
-		}
-		return nullptr;
-	}
-
 	FString GuessSuffix(const FString& UnknownSuffix, const UTexture2D* Texture)
 	{
-		if (const TCHAR* Alias = FindAlias(UnknownSuffix))
+		const FNaming& Names = Naming();
+		const FString Alias = Names.FindAlias(UnknownSuffix);
+		if (!Alias.IsEmpty())
 		{
 			return Alias;
 		}
-		// _A: albedo when it's sRGB color, else alpha (opacity)
-		if (UnknownSuffix.Equals(AmbiguousSuffix, ESearchCase::IgnoreCase))
+		// The ambiguous suffix (A: albedo or alpha): color when it's sRGB, else opacity
+		const FString Ambiguous = Clean(Names.AmbiguousSuffix);
+		if (!Ambiguous.IsEmpty() && UnknownSuffix.Equals(Ambiguous, ESearchCase::IgnoreCase))
 		{
-			return Texture->SRGB ? TEXT("D") : TEXT("O");
+			return Clean(Texture->SRGB ? Names.ColorSuffix : Names.OpacitySuffix);
 		}
 		if (Texture->CompressionSettings == TC_Normalmap)
 		{
-			return TEXT("N");
+			return Clean(Names.NormalSuffix);
 		}
 		if (Texture->SRGB && (Texture->CompressionSettings == TC_Default || Texture->CompressionSettings == TC_BC7))
 		{
-			return TEXT("D");
+			return Clean(Names.ColorSuffix);
 		}
 		return FString();
 	}
@@ -181,7 +135,7 @@ namespace TextureValidator
 	{
 		// 1. Known prefix, number, parts
 		FString Rest = Name;
-		const bool bKnownPrefix = Rest.RemoveFromStart(VirtualPrefix, ESearchCase::CaseSensitive) || Rest.RemoveFromStart(TexturePrefix);
+		const bool bKnownPrefix = RemovePrefix(Rest, Naming().VirtualTexturePrefix) || RemovePrefix(Rest, Naming().TexturePrefix, ESearchCase::IgnoreCase);
 		FString Number;
 		int32 Underscore;
 		if (Rest.FindLastChar(TEXT('_'), Underscore) && Rest.Mid(Underscore + 1).IsNumeric())
@@ -259,13 +213,17 @@ namespace TextureValidator
 			|| Group == TEXTUREGROUP_WeaponNormalMap || Group == TEXTUREGROUP_VehicleNormalMap;
 	}
 
-	/** "_D, _BC, ..." built from SuffixRules, for tooltips. */
+	/** "_D, _N, ..." from the naming settings, for tooltips. */
 	FString GetKnownSuffixList()
 	{
 		TArray<FString> Names;
-		for (const FSuffixRule& Rule : SuffixRules)
+		for (const FSuffixRule& Rule : Naming().Suffixes)
 		{
-			Names.Add(FString(TEXT("_")) + Rule.Suffix);
+			const FString Suffix = Clean(Rule.Suffix);
+			if (!Suffix.IsEmpty())
+			{
+				Names.AddUnique(TEXT("_") + Suffix);
+			}
 		}
 		return FString::Join(Names, TEXT(", "));
 	}
@@ -283,9 +241,6 @@ namespace TextureValidator
 		};
 	}
 
-	/** Prefix of Curve Atlas textures (Curve Linear Color Atlas assets, or lookup textures baked from them). */
-	const TCHAR* const CurveAtlasPrefix = TEXT("CA_");
-
 	/**
 	 * Curve atlases: each row is a color curve sampled across the width, read as exact linear values.
 	 *  - Naming: CA_ prefix, no type suffix needed (the prefix says what it is).
@@ -300,9 +255,11 @@ namespace TextureValidator
 	{
 		using ESeverity = FAssetIssue::ESeverity;
 
-		if (Settings.bCheckNaming && bIsAtlasAsset && !Name.StartsWith(CurveAtlasPrefix, ESearchCase::CaseSensitive))
+		const FString& AtlasPrefix = Naming().CurveAtlasPrefix;
+		if (Settings.bCheckNaming && bIsAtlasAsset && !AtlasPrefix.IsEmpty() && !FNaming::HasPrefix(Name, AtlasPrefix))
 		{
-			AddIssue(ESeverity::Warning, LOCTEXT("RuleNaming", "Naming"), LOCTEXT("AtlasPrefix", "Curve Atlas should start with CA_")).RenameTo = CurveAtlasPrefix + Name;
+			AddIssue(ESeverity::Warning, LOCTEXT("RuleNaming", "Naming"), FText::Format(LOCTEXT("AtlasPrefix", "Curve Atlas should start with {0}"), FText::FromString(AtlasPrefix)))
+				.RenameTo = AtlasPrefix + Name;
 		}
 
 		if (Settings.bCheckSettings)
@@ -353,9 +310,9 @@ namespace TextureValidator
 		Name.ParseIntoArray(Parts, TEXT("_"), true);
 		for (const FString& Part : Parts)
 		{
-			for (const TCHAR* Suffix : VATSuffixes)
+			for (const FString& Suffix : Naming().VertexAnimationNameParts)
 			{
-				if (Part.Equals(Suffix, ESearchCase::IgnoreCase))
+				if (!Suffix.IsEmpty() && Part.Equals(Suffix.TrimStartAndEnd(), ESearchCase::IgnoreCase))
 				{
 					return true;
 				}
@@ -377,14 +334,15 @@ namespace TextureValidator
 	{
 		using ESeverity = FAssetIssue::ESeverity;
 
-		if (Settings.bCheckNaming && !Name.StartsWith(VATPrefix, ESearchCase::CaseSensitive))
+		const FString& VATPrefix = Naming().VertexAnimationPrefix;
+		if (Settings.bCheckNaming && !VATPrefix.IsEmpty() && !FNaming::HasPrefix(Name, VATPrefix))
 		{
 			FString Body = Name;
-			if (!Body.RemoveFromStart(TexturePrefix))
+			if (!RemovePrefix(Body, Naming().TexturePrefix, ESearchCase::IgnoreCase))
 			{
-				Body.RemoveFromStart(VirtualPrefix);
+				RemovePrefix(Body, Naming().VirtualTexturePrefix, ESearchCase::IgnoreCase);
 			}
-			AddIssue(ESeverity::Warning, LOCTEXT("RuleNaming", "Naming"), LOCTEXT("VATPrefix", "Vertex animation texture should start with VAT_"))
+			AddIssue(ESeverity::Warning, LOCTEXT("RuleNaming", "Naming"), FText::Format(LOCTEXT("VATPrefix", "Vertex animation texture should start with {0}"), FText::FromString(VATPrefix)))
 				.RenameTo = VATPrefix + AssetValidation::CleanNameBody(Body);
 		}
 
@@ -454,14 +412,15 @@ namespace TextureValidator
 
 		// Curve atlases (CA_, or a Curve Atlas asset) are lookup tables of linear curve values: their own rules
 		const bool bIsAtlasAsset = Texture->IsA<UCurveLinearColorAtlas>();
-		if (bIsAtlasAsset || Name.StartsWith(CurveAtlasPrefix, ESearchCase::CaseSensitive))
+		const FNaming& Names = Naming();
+		if (bIsAtlasAsset || FNaming::HasPrefix(Name, Names.CurveAtlasPrefix))
 		{
 			ValidateCurveAtlas(Name, bIsAtlasAsset, Texture, Settings, AddIssue);
 			return;
 		}
 
 		// Vertex animation textures (VAT_, or a VAT bake part in the name) are exact data per texel: their own rules
-		if (Name.StartsWith(VATPrefix, ESearchCase::CaseSensitive) || HasVATSuffix(Name))
+		if (FNaming::HasPrefix(Name, Names.VertexAnimationPrefix) || HasVATSuffix(Name))
 		{
 			ValidateVAT(Name, Texture, Settings, AddIssue);
 			return;
@@ -473,7 +432,8 @@ namespace TextureValidator
 
 		// Virtual textures: streamed in tiles, named VT_
 		const bool bVirtual = Texture->VirtualTextureStreaming != 0;
-		const bool bVirtualName = Name.StartsWith(VirtualPrefix, ESearchCase::CaseSensitive);
+		const FString& VirtualPrefix = Names.VirtualTexturePrefix;
+		const bool bVirtualName = FNaming::HasPrefix(Name, VirtualPrefix);
 		const bool bPowerOfTwo = Texture->Source.IsValid()
 			&& FMath::IsPowerOfTwo(Texture->Source.GetSizeX()) && FMath::IsPowerOfTwo(Texture->Source.GetSizeY());
 		const bool bPadded = Texture->PowerOfTwoMode != ETexturePowerOfTwoSetting::None;
@@ -485,38 +445,49 @@ namespace TextureValidator
 			const FText Rule = LOCTEXT("RuleNaming", "Naming");
 
 			// The names both naming issues fix to (VT_ for virtual textures, or ones already named VT_)
-			const FString Prefix = bVirtual || bVirtualName ? VirtualPrefix : TexturePrefix;
+			const FString& TexturePrefix = Names.TexturePrefix;
+			const FString Prefix = (bVirtual || bVirtualName) && !VirtualPrefix.IsEmpty() ? VirtualPrefix : TexturePrefix;
 			const FString NewSuffix = SuffixRule ? FString() : GuessSuffix(Suffix, Texture);
-			FString Names[2][2];
-			MakeTextureNames(Name, Prefix, NewSuffix, Names);
+			FString NewNames[2][2];
+			MakeTextureNames(Name, Prefix, NewSuffix, NewNames);
 
-			if (bVirtual && !bVirtualName)
+			if (bVirtual && !bVirtualName && !VirtualPrefix.IsEmpty())
 			{
 				// T_Rock_D -> VT_Rock_D
-				AssetValidation::SetRenameChoices(AddIssue(ESeverity::Warning, Rule, LOCTEXT("MissingVirtualPrefix", "Virtual texture should start with VT_")), Name, Names);
+				AssetValidation::SetRenameChoices(AddIssue(ESeverity::Warning, Rule,
+					FText::Format(LOCTEXT("MissingVirtualPrefix", "Virtual texture should start with {0}"), FText::FromString(VirtualPrefix))), Name, NewNames);
 			}
-			else if (!bVirtual && !bVirtualName && !Name.StartsWith(TexturePrefix))
+			// No virtual prefix set: virtual textures follow the regular texture prefix
+			else if ((!bVirtual || VirtualPrefix.IsEmpty()) && !bVirtualName && !TexturePrefix.IsEmpty() && !Name.StartsWith(TexturePrefix))
 			{
-				AssetValidation::SetRenameChoices(AddIssue(ESeverity::Warning, Rule, LOCTEXT("MissingPrefix", "Name should start with T_")), Name, Names);
+				AssetValidation::SetRenameChoices(AddIssue(ESeverity::Warning, Rule,
+					FText::Format(LOCTEXT("MissingPrefix", "Name should start with {0}"), FText::FromString(TexturePrefix))), Name, NewNames);
 			}
 			if (!SuffixRule)
 			{
-				const TCHAR* Alias = FindAlias(Suffix);
+				const FString Alias = Names.FindAlias(Suffix);
+				const FString Ambiguous = Clean(Names.AmbiguousSuffix);
 				FText Message;
 				if (Suffix.IsEmpty())
 				{
-					Message = LOCTEXT("MissingSuffix", "Name has no type suffix (e.g. _D, _N, _ORM)");
+					// A few of the known suffixes as examples
+					TArray<FString> Examples;
+					GetKnownSuffixList().ParseIntoArray(Examples, TEXT(", "));
+					Examples.SetNum(FMath::Min(Examples.Num(), 3));
+					Message = Examples.Num() > 0
+						? FText::Format(LOCTEXT("MissingSuffix", "Name has no type suffix (e.g. {0})"), FText::FromString(FString::Join(Examples, TEXT(", "))))
+						: LOCTEXT("MissingSuffixNoList", "Name has no type suffix");
 				}
-				else if (Suffix.Equals(AmbiguousSuffix, ESearchCase::IgnoreCase))
+				else if (!Ambiguous.IsEmpty() && Suffix.Equals(Ambiguous, ESearchCase::IgnoreCase))
 				{
-					Message = FText::Format(LOCTEXT("AmbiguousSuffix", "_A could mean Albedo or Alpha: use _D for color or _O for opacity (its settings point to _{0})"),
-						FText::FromString(NewSuffix));
+					Message = FText::Format(LOCTEXT("AmbiguousSuffix", "_{0} could mean color or opacity: use _{1} for color or _{2} for opacity (its settings point to _{3})"),
+						FText::FromString(Suffix), FText::FromString(Clean(Names.ColorSuffix)), FText::FromString(Clean(Names.OpacitySuffix)), FText::FromString(NewSuffix));
 				}
-				else if (Alias && FCString::Strcmp(Alias, TEXT("D")) == 0)
+				else if (!Alias.IsEmpty() && Alias.Equals(Clean(Names.ColorSuffix), ESearchCase::IgnoreCase))
 				{
-					Message = FText::Format(LOCTEXT("DiffuseSuffix", "Diffuse, albedo and base color textures use _D, not _{0}"), FText::FromString(Suffix));
+					Message = FText::Format(LOCTEXT("DiffuseSuffix", "Diffuse, albedo and base color textures use _{0}, not _{1}"), FText::FromString(Alias), FText::FromString(Suffix));
 				}
-				else if (Alias)
+				else if (!Alias.IsEmpty())
 				{
 					Message = FText::Format(LOCTEXT("AliasSuffix", "Use _{0} instead of _{1}"), FText::FromString(Alias), FText::FromString(Suffix));
 				}
@@ -527,7 +498,7 @@ namespace TextureValidator
 				FAssetIssue& Issue = AddIssue(ESeverity::Warning, Rule, Message);
 				if (!NewSuffix.IsEmpty())
 				{
-					AssetValidation::SetRenameChoices(Issue, Name, Names);
+					AssetValidation::SetRenameChoices(Issue, Name, NewNames);
 				}
 			}
 		}
@@ -655,13 +626,14 @@ namespace TextureValidator
 				// Named VT_ but not virtual. With VT off for the project, the engine turns it off on every texture
 				if (!UTexture::IsVirtualTexturingEnabled())
 				{
-					AddIssue(ESeverity::Error, Rule, LOCTEXT("ProjectVTOff", "Named VT_, but virtual texturing is off for the project (Project Settings > Rendering > Virtual Textures)"));
+					AddIssue(ESeverity::Error, Rule, FText::Format(LOCTEXT("ProjectVTOff", "Named {0}, but virtual texturing is off for the project (Project Settings > Rendering > Virtual Textures)"), FText::FromString(VirtualPrefix)));
 				}
 				else
 				{
-					FAssetIssue& Issue = AddIssue(ESeverity::Warning, Rule, bCanBeVirtual
-						? LOCTEXT("VTOff", "Named VT_, but Virtual Texture Streaming is off (materials sampling it then need Virtual sampler types)")
-						: LOCTEXT("VTOffCant", "Named VT_, but Virtual Texture Streaming is off, and it can't be virtual as it is (not a power of two, or ColorLookupTable group)"));
+					FAssetIssue& Issue = AddIssue(ESeverity::Warning, Rule, FText::Format(bCanBeVirtual
+						? LOCTEXT("VTOff", "Named {0}, but Virtual Texture Streaming is off (materials sampling it then need Virtual sampler types)")
+						: LOCTEXT("VTOffCant", "Named {0}, but Virtual Texture Streaming is off, and it can't be virtual as it is (not a power of two, or ColorLookupTable group)"),
+						FText::FromString(VirtualPrefix)));
 					if (bCanBeVirtual)
 					{
 						// What UTexture::SetVirtualTextureStreaming does (it isn't exported): the property event tells the materials using it to update

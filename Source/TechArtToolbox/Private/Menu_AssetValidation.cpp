@@ -10,6 +10,7 @@
  */
 
 #include "Menu_AssetValidation.h"
+#include "TechArtToolboxNamingSettings.h"
 
 #include "ContentBrowserModule.h"
 #include "Core_Common.h"
@@ -196,6 +197,14 @@ TSharedRef<SWidget> SMenu_AssetValidation::CreateScanSection()
 				.IsEnabled_Lambda([this]() { return bValidateTextures || bValidateMeshes || bValidateMaterials; })
 				.OnClicked(this, &SMenu_AssetValidation::OnScanSelectionClicked)
 			]
+			+ SHorizontalBox::Slot().FillWidth(1.0f)
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+			[
+				SNew(SButton)
+				.Text(LOCTEXT("NamingSettings", "Naming Conventions..."))
+				.ToolTipText(LOCTEXT("NamingSettingsTip", "Open Project Settings > Plugins > TechArt Toolbox Asset Naming: the prefixes and suffixes these checks use"))
+				.OnClicked_Lambda([]() { UTechArtToolboxNamingSettings::ShowInProjectSettings(); return FReply::Handled(); })
+			]
 		],
 	}));
 }
@@ -210,7 +219,13 @@ TSharedRef<SWidget> SMenu_AssetValidation::CreateTextureSection()
 		LOCTEXT("TextureHeaderTip", "Check textures when scanning"), {
 		VrrMenu::Row(LOCTEXT("NamingLabel", "Naming"),
 			VrrMenu::CheckBox(&TextureSettings.bCheckNaming, LOCTEXT("CheckNaming", "Naming convention"),
-				FText::Format(LOCTEXT("CheckNamingTip", "Name starts with T_ (VT_ for virtual textures) and ends with a known suffix: {0}. Curve atlases start with CA_ instead and need no suffix (they get their own linear, no-mips rules)"), FText::FromString(TextureValidator::GetKnownSuffixList())))),
+				TAttribute<FText>::CreateLambda([]()
+				{
+					const UTechArtToolboxNamingSettings& Naming = UTechArtToolboxNamingSettings::Get();
+					return FText::Format(LOCTEXT("CheckNamingTip", "Name starts with {0} ({1} for virtual textures) and ends with a known suffix: {2}. Curve atlases start with {3} and vertex animation textures with {4}; neither needs a suffix (they get their own rules). Set in Naming Conventions."),
+						FText::FromString(Naming.TexturePrefix), FText::FromString(Naming.VirtualTexturePrefix), FText::FromString(TextureValidator::GetKnownSuffixList()),
+						FText::FromString(Naming.CurveAtlasPrefix), FText::FromString(Naming.VertexAnimationPrefix));
+				}))),
 		VrrMenu::Row(LOCTEXT("SettingsLabel", "Settings"),
 			VrrMenu::CheckBox(&TextureSettings.bCheckSettings, LOCTEXT("CheckSettings", "Settings match suffix"),
 				LOCTEXT("CheckSettingsTip", "sRGB and compression fit what the suffix says the texture holds (color, normal, mask)"))),
@@ -242,7 +257,7 @@ TSharedRef<SWidget> SMenu_AssetValidation::CreateTextureSection()
 				LOCTEXT("CheckMipsTip", "Has mipmaps, can stream, and normal maps use a normal map texture group (UI textures are skipped)"))),
 		VrrMenu::Row(LOCTEXT("VirtualLabel", "Virtual"),
 			VrrMenu::CheckBox(&TextureSettings.bCheckVirtual, LOCTEXT("CheckVirtual", "Virtual texture rules"),
-				LOCTEXT("CheckVirtualTip", "VT_ textures have Virtual Texture Streaming on (and the project has virtual texturing), a power-of-two size or padding, mipmaps, not the ColorLookupTable group, and aren't under the min size. Virtual textures skip the max size and Never Stream checks"))),
+				LOCTEXT("CheckVirtualTip", "Textures named as virtual (VT_ by default) have Virtual Texture Streaming on (and the project has virtual texturing), a power-of-two size or padding, mipmaps, not the ColorLookupTable group, and aren't under the min size. Virtual textures skip the max size and Never Stream checks"))),
 		VrrMenu::Row(LOCTEXT("VirtualMinSize", "Min virtual size"),
 			VrrMenu::IntField(&TextureSettings.VirtualMinSize, 0, 65536),
 			LOCTEXT("VirtualMinSizeTip", "Virtual textures whose largest side is under this get a warning: they're cheaper as regular textures"),
@@ -257,10 +272,19 @@ TSharedRef<SWidget> SMenu_AssetValidation::CreateMeshSection()
 		LOCTEXT("MeshHeaderTip", "Check static and skeletal meshes when scanning"), {
 		VrrMenu::Row(LOCTEXT("MeshNamingLabel", "Naming"),
 			VrrMenu::CheckBox(&MeshSettings.bCheckNaming, LOCTEXT("CheckMeshNaming", "Naming convention"),
-				FText::Format(LOCTEXT("CheckMeshNamingTip", "Prefix fits the asset: {0}. After the prefix: letters, digits and single underscores"), FText::FromString(MeshValidator::GetPrefixList())))),
+				TAttribute<FText>::CreateLambda([]()
+				{
+					return FText::Format(LOCTEXT("CheckMeshNamingTip", "Prefix fits the asset: {0}. After the prefix: letters, digits and single underscores. Set in Naming Conventions."), FText::FromString(MeshValidator::GetPrefixList()));
+				}))),
 		VrrMenu::Row(LOCTEXT("MaterialsLabel", "Materials"),
 			VrrMenu::CheckBox(&MeshSettings.bCheckMaterials, LOCTEXT("CheckMaterials", "Slots filled and named"),
-				LOCTEXT("CheckMaterialsTip", "Every material slot has a material, and project materials start with M_ or MI_"))),
+				TAttribute<FText>::CreateLambda([]()
+				{
+					const UTechArtToolboxNamingSettings& Naming = UTechArtToolboxNamingSettings::Get();
+					TArray<FString> Prefixes = UTechArtToolboxNamingSettings::NonEmpty(Naming.MaterialPrefixes);
+					Prefixes.Append(UTechArtToolboxNamingSettings::NonEmpty(Naming.MaterialInstancePrefixes));
+					return FText::Format(LOCTEXT("CheckMaterialsTip", "Every material slot has a material, and project materials start with {0}"), FText::FromString(FString::Join(Prefixes, TEXT(" or "))));
+				}))),
 		VrrMenu::Row(LOCTEXT("CollisionLabel", "Collision"),
 			VrrMenu::CheckBox(&MeshSettings.bCheckCollision, LOCTEXT("CheckCollision", "Has collision"),
 				LOCTEXT("CheckCollisionTip", "Static meshes have simple collision (or use complex as simple); skeletal meshes have a physics asset"))),
@@ -295,7 +319,10 @@ TSharedRef<SWidget> SMenu_AssetValidation::CreateMaterialSection()
 		LOCTEXT("MaterialHeaderTip", "Check materials, material instances, material functions and post process materials when scanning"), {
 		VrrMenu::Row(LOCTEXT("MaterialNamingLabel", "Naming"),
 			VrrMenu::CheckBox(&MaterialSettings.bCheckNaming, LOCTEXT("CheckMaterialNaming", "Naming convention"),
-				FText::Format(LOCTEXT("CheckMaterialNamingTip", "Prefix fits the asset: {0}. After the prefix: letters, digits and single underscores"), FText::FromString(MaterialValidator::GetPrefixList())))),
+				TAttribute<FText>::CreateLambda([]()
+				{
+					return FText::Format(LOCTEXT("CheckMaterialNamingTip", "Prefix fits the asset: {0}. After the prefix: letters, digits and single underscores. Set in Naming Conventions."), FText::FromString(MaterialValidator::GetPrefixList()));
+				}))),
 		VrrMenu::Row(LOCTEXT("InstSuffixLabel", "Instances"),
 			VrrMenu::CheckBox(&MaterialSettings.bCheckInstSuffix, LOCTEXT("CheckInstSuffix", "No _Inst suffix"),
 				LOCTEXT("CheckInstSuffixTip", "Material instances don't keep the _Inst suffix Unreal adds to new instances (M_Rock_Inst). Fix All renames them (to MI_Rock, or PPMI_ for post process instances)"))),

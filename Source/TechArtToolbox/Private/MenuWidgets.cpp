@@ -244,7 +244,7 @@ namespace VrrMenu
 
 	// FIELDS
 	/** Checkbox that reads and writes *bValue directly. */
-	TSharedRef<SWidget> CheckBox(bool* bValue, const FText& Text, const FText& ToolTip)
+	TSharedRef<SWidget> CheckBox(bool* bValue, const FText& Text, const TAttribute<FText>& ToolTip)
 	{
 		return SNew(SCheckBox)
 			.ToolTipText(ToolTip)
