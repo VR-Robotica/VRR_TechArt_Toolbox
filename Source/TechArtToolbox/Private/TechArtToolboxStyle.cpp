@@ -53,7 +53,7 @@ TSharedRef< FSlateStyleSet > FTechArtToolboxStyle::Create()
 	TSharedRef< FSlateStyleSet > Style = MakeShareable(new FSlateStyleSet("TechArtToolboxStyle"));
 	Style->SetContentRoot(IPluginManager::Get().FindPlugin(TEXT("TechArtToolbox"))->GetBaseDir() / TEXT("Resources"));
 
-	Style->Set("TechArtToolbox.CMD_OpenPopUpWindow", new IMAGE_BRUSH(TEXT("Icon128.png"), Icon20x20));
+	Style->Set("TechArtToolbox.CMD_OpenPopUpWindow", new IMAGE_BRUSH(TEXT("Icon128"), Icon20x20));
 
 	// GOD TOOLS WINDOW
 	// Header logo: LOGO.png is 1024 x 256, shown at a quarter size
